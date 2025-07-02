@@ -138,7 +138,7 @@ def eval_on_test_set(
             f.write("\nSUMMARY METRICS:\n")
             f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
             f.write(f"Number of wins: {reward_metrics['num_wins']}\n")
-            f.write(f"Total comparisons: {reward_metrics['num_comparisons']}\n")
+            f.write(f"Total comparisons: {reward_metrics.get('num_comparisons', reward_metrics.get('num_debates', 0))}\n")
             f.write(f"Average format scores:\n")
             f.write(f"  Strict format: {reward_metrics['rewards/strict_format']:.4f}\n")
             f.write(f"  Soft format: {reward_metrics['rewards/soft_format']:.4f}\n")
