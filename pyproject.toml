@@ -8,6 +8,7 @@ dependencies = [
     "accelerate>=1.8.1",
     "anthropic>=0.56.0",
     "datasets>=3.6.0",
+    "flash-attn>=2.8.0.post2",
     "matplotlib>=3.10.3",
     "numpy>=2.3.1",
     "openai>=1.93.0",
