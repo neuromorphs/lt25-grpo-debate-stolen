@@ -1,3 +1,9 @@
+New instructions:
+```
+uv sync
+uv run python main.py (...)
+```
+
 # GRPO for Soft Reward Training
 
 ## Overview
