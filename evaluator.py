@@ -237,6 +237,217 @@ class DebateEvaluator(RewardEvaluator):
         }
         
         return rewards_per_func, metrics
+        
+    def _compute_train_rewards_batched(
+        self,
+        input_prompt: str,
+        all_models: Dict[str, Any],
+        train_model_completions: List[str],
+        device: str
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Batched round-robin tournament scoring for training + format rewards."""
+        num_completions = len(train_model_completions)
+        rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+        
+        # Track wins/losses for each completion
+        wins = torch.zeros(num_completions, device=device)
+        losses = torch.zeros(num_completions, device=device)
+        
+        # Collect all comparisons and judge prompts upfront
+        comparisons = []
+        judge_prompts = []
+        
+        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        
+        for i in range(num_completions):
+            for j in range(i + 1, num_completions):
+                response1 = self._extract_xml_answer(train_model_completions[i])
+                response2 = self._extract_xml_answer(train_model_completions[j])
+                
+                judge_prompt = self.judge_prompt.format(
+                    topic=topic,
+                    arg1_response=response1,
+                    arg2_response=response2
+                )
+                
+                comparisons.append((i, j))
+                judge_prompts.append(judge_prompt)
+        
+        # Batch all judge evaluations at once
+        if hasattr(all_models["judge_model"], 'generate_batch_prompts') and judge_prompts:
+            print(f"Using batched judge evaluation for {len(judge_prompts)} comparisons")
+            judge_responses = all_models["judge_model"].generate_batch_prompts(
+                system_prompt="You are an impartial debate judge.",
+                user_prompts=judge_prompts,
+                max_new_tokens=50,
+                temperature=0.1
+            )
+        else:
+            # Fallback to sequential evaluation
+            print(f"Using sequential judge evaluation for {len(judge_prompts)} comparisons")
+            judge_responses = []
+            for judge_prompt in tqdm(judge_prompts, desc="Judge evaluations", leave=False):
+                response = all_models["judge_model"].generate(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompt=judge_prompt,
+                    max_new_tokens=50,
+                    temperature=0.1
+                )
+                judge_responses.append(response)
+        
+        # Process judge responses and update wins/losses
+        for (i, j), judge_response in zip(comparisons, judge_responses):
+            judge_response = judge_response.strip().upper()
+            
+            if "ARGUMENT_1_WINS" in judge_response:
+                wins[i] += 1
+                losses[j] += 1
+            elif "ARGUMENT_2_WINS" in judge_response:
+                wins[j] += 1
+                losses[i] += 1
+
+        # Calculate normalized scores (-1.5 to 1.5 range)
+        total_matches = num_completions - 1  # number of matches per completion
+        win_rate = wins / total_matches
+        loss_rate = losses / total_matches
+        debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
+
+        # Get format rewards
+        strict_format = torch.tensor(
+            self._strict_format_reward(train_model_completions), 
+            device=device
+        )
+        soft_format = torch.tensor(
+            self._soft_format_reward(train_model_completions), 
+            device=device
+        )
+        xml_count = torch.tensor(
+            self._xml_count_reward(train_model_completions), 
+            device=device
+        )
+        
+        # Combine all rewards
+        rewards_per_func[:, 0] = debate_scores
+        rewards_per_func[:, 1] = strict_format
+        rewards_per_func[:, 2] = soft_format
+        rewards_per_func[:, 3] = xml_count
+        
+        metrics = {
+            "rewards/debate_score": debate_scores.mean().item(),
+            "rewards/strict_format": strict_format.mean().item(),
+            "rewards/soft_format": soft_format.mean().item(),
+            "rewards/xml_count": xml_count.mean().item(),
+            "reward": rewards_per_func.sum(dim=1).mean().item()
+        }
+        
+        return rewards_per_func, metrics
+    
+    def _compute_train_rewards_semi_batched(
+        self,
+        input_prompt: str,
+        all_models: Dict[str, Any],
+        train_model_completions: List[str],
+        device: str
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Semi-batched round-robin tournament scoring - batch inner loop only."""
+        num_completions = len(train_model_completions)
+        rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+        
+        # Track wins/losses for each completion
+        wins = torch.zeros(num_completions, device=device)
+        losses = torch.zeros(num_completions, device=device)
+        
+        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        
+        # Batch the inner loop for each completion
+        for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
+            # Collect all comparisons for completion i
+            judge_prompts = []
+            comparison_indices = []
+            
+            for j in range(i + 1, num_completions):
+                response1 = self._extract_xml_answer(train_model_completions[i])
+                response2 = self._extract_xml_answer(train_model_completions[j])
+                
+                judge_prompt = self.judge_prompt.format(
+                    topic=topic,
+                    arg1_response=response1,
+                    arg2_response=response2
+                )
+                
+                judge_prompts.append(judge_prompt)
+                comparison_indices.append(j)
+            
+            # Skip if no comparisons for this completion
+            if not judge_prompts:
+                continue
+            
+            # Batch evaluate all comparisons for completion i
+            if hasattr(all_models["judge_model"], 'generate_batch_prompts'):
+                judge_responses = all_models["judge_model"].generate_batch_prompts(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompts=judge_prompts,
+                    max_new_tokens=50,
+                    temperature=0.1
+                )
+            else:
+                # Fallback to sequential evaluation
+                judge_responses = []
+                for judge_prompt in judge_prompts:
+                    response = all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=50,
+                        temperature=0.1
+                    )
+                    judge_responses.append(response)
+            
+            # Process judge responses for completion i
+            for j, judge_response in zip(comparison_indices, judge_responses):
+                judge_response = judge_response.strip().upper()
+                
+                if "ARGUMENT_1_WINS" in judge_response:
+                    wins[i] += 1
+                    losses[j] += 1
+                elif "ARGUMENT_2_WINS" in judge_response:
+                    wins[j] += 1
+                    losses[i] += 1
+        
+        # Calculate normalized scores (-1.5 to 1.5 range)
+        total_matches = num_completions - 1  # number of matches per completion
+        win_rate = wins / total_matches
+        loss_rate = losses / total_matches
+        debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
+
+        # Get format rewards
+        strict_format = torch.tensor(
+            self._strict_format_reward(train_model_completions), 
+            device=device
+        )
+        soft_format = torch.tensor(
+            self._soft_format_reward(train_model_completions), 
+            device=device
+        )
+        xml_count = torch.tensor(
+            self._xml_count_reward(train_model_completions), 
+            device=device
+        )
+        
+        # Combine all rewards
+        rewards_per_func[:, 0] = debate_scores
+        rewards_per_func[:, 1] = strict_format
+        rewards_per_func[:, 2] = soft_format
+        rewards_per_func[:, 3] = xml_count
+        
+        metrics = {
+            "rewards/debate_score": debate_scores.mean().item(),
+            "rewards/strict_format": strict_format.mean().item(),
+            "rewards/soft_format": soft_format.mean().item(),
+            "rewards/xml_count": xml_count.mean().item(),
+            "reward": rewards_per_func.sum(dim=1).mean().item()
+        }
+        
+        return rewards_per_func, metrics
 
     def _compute_test_rewards(
         self,
@@ -319,13 +530,20 @@ class DebateEvaluator(RewardEvaluator):
         train_model_completions: List[str],
         compare_model_completions: Optional[List[str]] = None,
         device: str = "cuda",
-        is_test: bool = False
+        is_test: bool = False,
+        use_batched_eval: bool = False,
+        use_semi_batched_eval: bool = False
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:
             return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
         else:
-            return self._compute_train_rewards(input_prompt, all_models, train_model_completions, device)
+            if use_batched_eval:
+                return self._compute_train_rewards_batched(input_prompt, all_models, train_model_completions, device)
+            elif use_semi_batched_eval:
+                return self._compute_train_rewards_semi_batched(input_prompt, all_models, train_model_completions, device)
+            else:
+                return self._compute_train_rewards(input_prompt, all_models, train_model_completions, device)
             
     def get_reward_breakdown(self, rewards: torch.Tensor) -> Dict[str, float]:
         """Convert raw reward scores to a labeled dictionary."""
@@ -566,7 +784,8 @@ class LDEvaluator(RewardEvaluator):
         train_model_completions: List[str],
         compare_model_completions: Optional[List[str]] = None,
         device: str = "cuda",
-        is_test: bool = False
+        is_test: bool = False,
+        use_batched_eval: bool = False
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:
@@ -815,7 +1034,8 @@ class ChoppedEvaluator(RewardEvaluator):
         train_model_completions: List[str],
         compare_model_completions: Optional[List[str]] = None,
         device: str = "cuda",
-        is_test: bool = False
+        is_test: bool = False,
+        use_batched_eval: bool = False
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:

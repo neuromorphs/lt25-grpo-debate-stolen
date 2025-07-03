@@ -63,16 +63,27 @@ def eval_on_test_set(
                 all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
             )
 
-            # Generate completions for compare model using the interface
-            compare_completions_text = []
-            for _ in range(args.num_chains):
-                completion = all_models["compare_model"].generate(
+            # Generate completions for compare model using batched interface
+            if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
+                # Use efficient batched generation for HuggingFace models (e.g., Qwen)
+                compare_completions_text = all_models["compare_model"].generate_batch(
                     system_prompt=test_loader.pre_prompt,
                     user_prompt=question,
+                    num_completions=args.num_chains,
                     max_new_tokens=args.max_completion_length,
                     temperature=args.temperature
                 )
-                compare_completions_text.append(completion)
+            else:
+                # Fallback to sequential generation for API models or when batching is disabled
+                compare_completions_text = []
+                for _ in range(args.num_chains):
+                    completion = all_models["compare_model"].generate(
+                        system_prompt=test_loader.pre_prompt,
+                        user_prompt=question,
+                        max_new_tokens=args.max_completion_length,
+                        temperature=args.temperature
+                    )
+                    compare_completions_text.append(completion)
 
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
@@ -81,7 +92,9 @@ def eval_on_test_set(
                 train_model_completions=completions_text, 
                 compare_model_completions=compare_completions_text,
                 device=device,
-                is_test=True
+                is_test=True,
+                use_batched_eval=args.use_batch_judge,
+                use_semi_batched_eval=args.use_semi_batch_judge
             )
 
             # Track total comparisons and wins
@@ -307,7 +320,9 @@ def score_completions(
         train_model_completions=completions_text, 
         compare_model_completions=None,
         device=device, 
-        is_test=False
+        is_test=False,
+        use_batched_eval=args.use_batch_judge,
+        use_semi_batched_eval=args.use_semi_batch_judge
     )
     rewards = rewards_per_func.sum(dim=1)
 
@@ -497,6 +512,9 @@ def parse_args():
     parser.add_argument("--num_chains", type=int, default=16, help="Number of parallel generation chains")
     parser.add_argument("--max_prompt_length", type=int, default=256, help="Maximum prompt length")
     parser.add_argument("--max_completion_length", type=int, default=786, help="Maximum completion length")
+    parser.add_argument("--use_batch_generation", action="store_true", help="Use batched generation for compare model (more efficient for HuggingFace models)")
+    parser.add_argument("--use_batch_judge", action="store_true", help="Use batched evaluation for judge model (much faster for HuggingFace judge models)")
+    parser.add_argument("--use_semi_batch_judge", action="store_true", help="Use semi-batched evaluation for judge model (batch inner loop only, reduces memory usage)")
 
     # Training parameters
     parser.add_argument("--num_train_iters", type=int, default=1000, help="Number of training iterations")
@@ -601,7 +619,7 @@ if __name__ == "__main__":
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"):
         print(f"Round {round_num}")
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations == 0:
+        if round_num % args.eval_iterations == 0 and round_num > 0:
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,

@@ -66,16 +66,27 @@ def eval_with_separate_judge(
                 all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
             )
 
-            # Generate completions for compare model using the interface
-            compare_completions_text = []
-            for _ in range(args.num_chains):
-                completion = all_models["compare_model"].generate(
+            # Generate completions for compare model using batched interface
+            if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
+                # Use efficient batched generation for HuggingFace models (e.g., Qwen)
+                compare_completions_text = all_models["compare_model"].generate_batch(
                     system_prompt=test_loader.pre_prompt,
                     user_prompt=question,
+                    num_completions=args.num_chains,
                     max_new_tokens=args.max_completion_length,
                     temperature=args.temperature
                 )
-                compare_completions_text.append(completion)
+            else:
+                # Fallback to sequential generation for API models or when batching is disabled
+                compare_completions_text = []
+                for _ in range(args.num_chains):
+                    completion = all_models["compare_model"].generate(
+                        system_prompt=test_loader.pre_prompt,
+                        user_prompt=question,
+                        max_new_tokens=args.max_completion_length,
+                        temperature=args.temperature
+                    )
+                    compare_completions_text.append(completion)
 
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
@@ -272,6 +283,7 @@ def parse_args():
     parser.add_argument("--num_chains", type=int, default=16, help="Number of parallel generation chains")
     parser.add_argument("--max_prompt_length", type=int, default=256, help="Maximum prompt length")
     parser.add_argument("--max_completion_length", type=int, default=786, help="Maximum completion length")
+    parser.add_argument("--use_batch_generation", action="store_true", help="Use batched generation for compare model (more efficient for HuggingFace models)")
 
     args = parser.parse_args()
     return args
