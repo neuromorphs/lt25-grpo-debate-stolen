@@ -18,7 +18,7 @@ def get_llm_tokenizer(model_name: str, device: str) -> tuple[PreTrainedModel, Pr
     Returns:
         tuple containing:
             - The loaded language model
-            - The configured tokenizer for that model
+            - The configured tokenizer for that model (recovered from the loaded model)
     """
     # model = AutoModelForCausalLM.from_pretrained(
     #     model_name,

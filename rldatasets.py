@@ -72,6 +72,11 @@ class DebateDataLoader(DataLoader):
     This class implements both sequential and random access to debate topics through
     standard Python iterator protocols. For each topic, it randomly assigns PRO or CON
     position to create debate scenarios.
+
+    Attributes:
+        topics (list[str]): List of debate topics (here 43 topics for training and 7 for testing)
+        pre_prompt (str): Instructional prompt for the model
+        system_prompt (str): System prompt to guide the model's responses
     """
     
     def __init__(self, topics: list[str], random: bool = False) -> None:

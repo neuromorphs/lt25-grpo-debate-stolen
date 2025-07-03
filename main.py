@@ -640,6 +640,9 @@ if __name__ == "__main__":
         # Get next question
         question = next(train_loader)
 
+        # Clear cache before GRPO
+        torch.cuda.empty_cache()
+        
         # Do GRPO - generate chains, score, compute advantage, compute loss 
         total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, device, round_num, train_log_dir, args)
         
@@ -666,4 +669,9 @@ if __name__ == "__main__":
 
         # Add after each major operation in the training loop
         torch.cuda.empty_cache()
+        
+        # Additional memory cleanup
+        if round_num % 10 == 0:  # Every 10 rounds
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     
