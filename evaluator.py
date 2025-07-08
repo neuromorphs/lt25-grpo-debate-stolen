@@ -131,16 +131,39 @@ class DebateEvaluator(RewardEvaluator):
         except:
             return text  # Fallback if format is incorrect
    
-    def _strict_format_reward(self, completions) -> List[float]:
-        """Reward for strict XML format."""
-        pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n$"
-        matches = [bool(re.match(pattern, r)) for r in completions]
-        return [0.5 if m else 0.0 for m in matches]
+    # def _strict_format_reward(self, completions) -> List[float]:
+    #     """Reward for strict XML format."""
+    #     # for i in range(16):
+    #     #     print(f"Completion {i}: {completions[i][:100]}")
+    #     #     print(f"{completions[i][-100:]}")
+    #     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n?$"
+    #     print(completions[0])
+    #     print(bool(re.match(pattern, completions[0])))
+    #     matches = [bool(re.match(pattern, r)) for r in completions]
+    #     return [0.5 if m else 0.0 for m in matches]
+
+    # def _soft_format_reward(self, completions) -> List[float]:
+    #     """Reward for relaxed XML format."""
+    #     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+    #     print(completions[0])
+    #     print(bool(re.match(pattern, completions[0])))
+    #     matches = [bool(re.match(pattern, r)) for r in completions]
+    #     return [0.5 if m else 0.0 for m in matches]
 
     def _soft_format_reward(self, completions) -> List[float]:
         """Reward for relaxed XML format."""
         pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
-        matches = [bool(re.match(pattern, r)) for r in completions]
+        # print(completions[0])
+        # print(bool(re.match(pattern, completions[0], re.DOTALL)))  # Add re.DOTALL here
+        matches = [bool(re.match(pattern, r, re.DOTALL)) for r in completions]  # And here
+        return [0.5 if m else 0.0 for m in matches]
+
+    def _strict_format_reward(self, completions) -> List[float]:
+        """Reward for strict XML format."""
+        pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n?$"
+        # print(completions[0])
+        # print(bool(re.match(pattern, completions[0], re.DOTALL)))  # Add re.DOTALL here
+        matches = [bool(re.match(pattern, r, re.DOTALL)) for r in completions]  # And here
         return [0.5 if m else 0.0 for m in matches]
 
     def _xml_count_reward(self, completions) -> List[float]:
@@ -208,20 +231,30 @@ class DebateEvaluator(RewardEvaluator):
         loss_rate = losses / total_matches
         debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
 
+        # Clean role prefixes that chat template might have added
+        cleaned_completions = []
+        for completion in train_model_completions:
+            # Remove common role prefixes
+            completion = completion.strip()
+            if completion.startswith(('user\n', 'system\n', 'assistant\n')):
+                completion = completion.split('\n', 1)[1] if '\n' in completion else completion
+            cleaned_completions.append(completion)
+
+        # print(f"Cleaned completions: {cleaned_completions[:5]}")  # Debugging output
+
         # Get format rewards
         strict_format = torch.tensor(
-            self._strict_format_reward(train_model_completions), 
+            self._strict_format_reward(cleaned_completions), 
             device=device
         )
         soft_format = torch.tensor(
-            self._soft_format_reward(train_model_completions), 
+            self._soft_format_reward(cleaned_completions), 
             device=device
         )
         xml_count = torch.tensor(
-            self._xml_count_reward(train_model_completions), 
+            self._xml_count_reward(cleaned_completions), 
             device=device
         )
-        
         # Combine all rewards
         rewards_per_func[:, 0] = debate_scores
         rewards_per_func[:, 1] = strict_format
@@ -312,17 +345,29 @@ class DebateEvaluator(RewardEvaluator):
         loss_rate = losses / total_matches
         debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
 
+        # Clean role prefixes that chat template might have added
+        cleaned_completions = []
+        for completion in train_model_completions:
+            # Remove common role prefixes
+            completion = completion.strip()
+            if completion.startswith(('user\n', 'system\n', 'assistant\n')):
+                completion = completion.split('\n', 1)[1] if '\n' in completion else completion
+            cleaned_completions.append(completion)
+
+        print(cleaned_completions)
+
+
         # Get format rewards
         strict_format = torch.tensor(
-            self._strict_format_reward(train_model_completions), 
+            self._strict_format_reward(cleaned_completions), 
             device=device
         )
         soft_format = torch.tensor(
-            self._soft_format_reward(train_model_completions), 
+            self._soft_format_reward(cleaned_completions), 
             device=device
         )
         xml_count = torch.tensor(
-            self._xml_count_reward(train_model_completions), 
+            self._xml_count_reward(cleaned_completions), 
             device=device
         )
         
@@ -419,19 +464,36 @@ class DebateEvaluator(RewardEvaluator):
         loss_rate = losses / total_matches
         debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
 
+        # Clean role prefixes that chat template might have added
+        cleaned_completions = []
+        for completion in train_model_completions:
+            # Remove common role prefixes
+            completion = completion.strip()
+            if completion.startswith(('user\n', 'system\n', 'assistant\n')):
+                completion = completion.split('\n', 1)[1] if '\n' in completion else completion
+            cleaned_completions.append(completion)
+
+        #print(f"Cleaned completions: {cleaned_completions[:5]}")  # Debugging output
+
+
         # Get format rewards
         strict_format = torch.tensor(
-            self._strict_format_reward(train_model_completions), 
+            self._strict_format_reward(cleaned_completions), 
             device=device
         )
         soft_format = torch.tensor(
-            self._soft_format_reward(train_model_completions), 
+            self._soft_format_reward(cleaned_completions), 
             device=device
         )
         xml_count = torch.tensor(
-            self._xml_count_reward(train_model_completions), 
+            self._xml_count_reward(cleaned_completions), 
             device=device
         )
+
+        # print(strict_format)
+        # print(soft_format)
+        # print(xml_count)
+
         
         # Combine all rewards
         rewards_per_func[:, 0] = debate_scores
@@ -536,13 +598,18 @@ class DebateEvaluator(RewardEvaluator):
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:
+            # print("Computing test rewards using head-to-head debates")
             return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
         else:
+            # print("Computing training rewards using round-robin tournament scoring")
             if use_batched_eval:
+                # print("Using batched evaluation for training rewards")
                 return self._compute_train_rewards_batched(input_prompt, all_models, train_model_completions, device)
             elif use_semi_batched_eval:
+                # print("Using semi-batched evaluation for training rewards")
                 return self._compute_train_rewards_semi_batched(input_prompt, all_models, train_model_completions, device)
             else:
+                # print("Using standard evaluation for training rewards")
                 return self._compute_train_rewards(input_prompt, all_models, train_model_completions, device)
             
     def get_reward_breakdown(self, rewards: torch.Tensor) -> Dict[str, float]:

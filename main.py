@@ -5,6 +5,7 @@ import os
 import json
 import torch
 import argparse
+import logging
 from tqdm import tqdm
 from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
@@ -14,6 +15,13 @@ import llms
 import utils
 import evaluator
 import rldatasets
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
 
 def eval_on_test_set(
     all_models: dict,
@@ -28,6 +36,7 @@ def eval_on_test_set(
     against a base model completion and having them judged.
     """
     print("Running evaluation on test set...")
+    logger = logging.getLogger(__name__) if hasattr(args, 'enable_detailed_logging') and args.enable_detailed_logging else None
     
     total_scores = defaultdict(float)
     num_examples = 0
@@ -196,6 +205,12 @@ def eval_on_test_set(
             for metric, value in avg_scores.items():
                 print(f"{metric:15s}: {value:.4f}")
             print("-" * 20)
+            
+        # Also log to file
+        if logger:
+            logger.info(f"Test evaluation completed - Win Rate: {win_rate:.2f}%, Total Wins: {total_wins}, Total Comparisons: {total_comparisons}")
+            for metric, value in avg_scores.items():
+                logger.info(f"Test {metric}: {value:.4f}")
 
     metrics_path = os.path.join(args.output_dir, f'eval_metrics_{round_num}.json')
     with open(metrics_path, 'w') as f:
@@ -490,6 +505,10 @@ def parse_args():
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--enable_detailed_logging", action="store_true", help="Enable detailed logging throughout training")
+    parser.add_argument("--enable_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="grpo-debate", help="Wandb project name")
+    parser.add_argument("--wandb_key_file", type=str, default="wandb_key.txt", help="Path to file containing wandb API key")
     parser.add_argument("--save_steps", type=int, default=80, help="Save model every N steps")
     parser.add_argument("--eval_iterations", type=int, default=40, help="Number of iterations for evaluation")
     parser.add_argument("--resume", action="store_true", help="Resume training from latest checkpoint")
@@ -529,20 +548,96 @@ if __name__ == "__main__":
     # Get all args 
     args = parse_args() 
     
+    # Setup logging
+    os.makedirs(args.output_dir, exist_ok=True)
+    if args.enable_detailed_logging:
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(os.path.join(args.output_dir, 'training.log')),
+                logging.StreamHandler()
+            ]
+        )
+        logger = logging.getLogger(__name__)
+        logger.info("Starting GRPO training")
+        logger.info(f"Arguments: {vars(args)}")
+    else:
+        # Setup minimal logging
+        logging.basicConfig(level=logging.WARNING)
+        logger = logging.getLogger(__name__)
+    
+    # Setup Weights & Biases logging
+    if args.enable_wandb and WANDB_AVAILABLE:
+        print("Setting up Weights & Biases logging...")
+        try:
+            # Read wandb key from file
+            if os.path.exists(args.wandb_key_file):
+                print(f"Reading wandb API key from {args.wandb_key_file}")
+                with open(args.wandb_key_file, 'r') as f:
+                    wandb_key = f.read().strip()
+                os.environ['WANDB_API_KEY'] = wandb_key
+                print("✓ API key loaded successfully")
+                
+                # Initialize wandb
+                run_name = f"{args.model_name.split('/')[-1]}_{args.dataset_name}_{args.evaluator}"
+                print(f"Initializing wandb project: {args.wandb_project}")
+                print(f"Run name: {run_name}")
+                
+                wandb.init(
+                    project=args.wandb_project,
+                    name=run_name,
+                    config=vars(args),
+                    resume="allow" if args.resume else None
+                )
+                print("✓ Wandb initialized successfully!")
+                print(f"🔗 View your run at: https://wandb.ai/{wandb.run.entity}/{args.wandb_project}/runs/{wandb.run.id}")
+                
+                if args.enable_detailed_logging:
+                    logger.info(f"Initialized wandb project: {args.wandb_project}, run: {run_name}")
+            else:
+                print(f"❌ Error: Wandb key file {args.wandb_key_file} not found.")
+                print("Please create the file and add your wandb API key to enable logging.")
+                args.enable_wandb = False
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize wandb: {e}")
+            print("Continuing without wandb logging...")
+            args.enable_wandb = False
+    elif args.enable_wandb and not WANDB_AVAILABLE:
+        print("❌ Error: wandb requested but not installed.")
+        print("Install with: pip install wandb")
+        args.enable_wandb = False
+    elif not args.enable_wandb:
+        print("Wandb logging disabled (use --enable_wandb to enable)")
+    else:
+        print("Wandb logging enabled - ERROR")
+
     # Seed everything 
     utils.seed_everything(args.seed)
+    if args.enable_detailed_logging:
+        logger.info(f"Random seed set to {args.seed}")
 
     # Set device and enable bf16
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.enable_detailed_logging:
+        logger.info(f"Using device: {device}")
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
     torch.set_float32_matmul_precision('high') 
 
     ## Set which model to train 
+    if args.enable_detailed_logging:
+        logger.info(f"Loading training model: {args.model_name}")
     model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)
+    if args.enable_detailed_logging:
+        logger.info(f"Loading base model: {args.model_name}")
     base_model, _ = llms.get_llm_tokenizer(args.model_name, device)
 
     # Get judge and compare models using the new interfaces
+    if args.enable_detailed_logging:
+        logger.info(f"Loading judge model: {args.judge_model_name}")
     judge_model = llms.get_judge_model(args.judge_model_name, device)
+    if args.enable_detailed_logging:
+        logger.info(f"Loading compare model: {args.compare_model_name}")
     compare_model = llms.get_compare_model(args.compare_model_name, device)
     
     # Simplified all_models dictionary
@@ -554,26 +649,40 @@ if __name__ == "__main__":
         "judge_model": judge_model,
         "compare_model": compare_model
     }
+    if args.enable_detailed_logging:
+        logger.info("All models loaded successfully")
 
     ## Set which data set 
+    if args.enable_detailed_logging:
+        logger.info(f"Loading dataset: {args.dataset_name}")
     train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
+    if args.enable_detailed_logging:
+        logger.info(f"Dataset loaded successfully")
 
     ## Set which evaluation criteria to use 
+    if args.enable_detailed_logging:
+        logger.info(f"Loading evaluator: {args.evaluator}")
     eval_class = evaluator.get_evaluator(args.evaluator)
+    if args.enable_detailed_logging:
+        logger.info(f"Evaluator loaded successfully")
 
 
-    # Setup logging 
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Setup logging directories and save arguments
     args_dict = vars(args)
     args_path = os.path.join(args.output_dir, 'args.json')
     with open(args_path, 'w') as f:
         json.dump(args_dict, f, indent=4)
+    if args.enable_detailed_logging:
+        logger.info(f"Saved training arguments to {args_path}")
+    
     eval_log_dir = os.path.join(args.output_dir, 'eval_logs')
     os.makedirs(eval_log_dir, exist_ok=True)
     train_log_dir = os.path.join(args.output_dir, 'training_logs')
     os.makedirs(train_log_dir, exist_ok=True)
     checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
+    if args.enable_detailed_logging:
+        logger.info(f"Created output directories: {args.output_dir}")
 
     # Setup optimizer for trainer agent with GRPO config settings
     optimizer = torch.optim.AdamW(
@@ -583,6 +692,8 @@ if __name__ == "__main__":
         weight_decay=args.weight_decay,
         eps=1e-8
     )
+    if args.enable_detailed_logging:
+        logger.info(f"Optimizer initialized with lr={args.learning_rate}, weight_decay={args.weight_decay}")
 
     # Add linear warmup learning rate scheduler
     warmup_steps = int(args.warmup_percent * args.num_train_iters)
@@ -591,6 +702,8 @@ if __name__ == "__main__":
             return (step / warmup_steps)
         return 1.0
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,lr_lambda=get_lr)
+    if args.enable_detailed_logging:
+        logger.info(f"Scheduler initialized with {warmup_steps} warmup steps ({args.warmup_percent:.0%} of {args.num_train_iters} total steps)")
 
     # Resume from checkpoint if requested
     start_round = 0
@@ -605,21 +718,37 @@ if __name__ == "__main__":
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
             start_round = checkpoint['round_num'] + 1
             train_metrics_total = checkpoint['train_metrics_total']
-            print(f"Resuming from checkpoint at step {latest_checkpoint}")
+            if args.enable_detailed_logging:
+                logger.info(f"Resuming from checkpoint at step {latest_checkpoint}")
         else:
-            print("No checkpoints found, starting from scratch")
+            if args.enable_detailed_logging:
+                logger.info("No checkpoints found, starting from scratch")
             train_metrics_total = {}
     else:
+        if args.enable_detailed_logging:
+            logger.info("Starting fresh training (no resume)")
         train_metrics_total = {}
 
     # Begin training 
     accumulated_loss = 0
     optimizer.zero_grad()
+    
+    if args.enable_detailed_logging:
+        logger.info(f"Starting training loop: {start_round} to {args.num_train_iters-1}")
+        logger.info(f"Total training steps: {args.num_train_iters - start_round}")
+        logger.info(f"Evaluation every {args.eval_iterations} steps")
+        logger.info(f"Saving checkpoints every {args.save_steps} steps")
 
+    #=======================================================================================================================
+    #==============================================      TRAINING LOOP       ===============================================
+    #=======================================================================================================================
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"):
-        print(f"Round {round_num}")
+        if args.enable_detailed_logging and round_num % 100 == 0:  # Log every 100 rounds to avoid spam
+            logger.info(f"Training round {round_num}/{args.num_train_iters-1}")
         # Evaluate on test set every so often 
         if round_num % args.eval_iterations == 0 and round_num > 0:
+            if args.enable_detailed_logging:
+                logger.info(f"Starting evaluation at round {round_num}")
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,
@@ -628,7 +757,27 @@ if __name__ == "__main__":
                 args=args,
                 round_num=round_num
             )
-
+            
+            if args.enable_detailed_logging:
+                logger.info(f"Evaluation completed - Win rate: {eval_accuracy:.2f}%")
+                logger.info(f"Evaluation metrics: {eval_metrics}")
+            
+            # Log evaluation to wandb
+            if args.enable_wandb:
+                eval_wandb_log = {
+                    "eval/win_rate": eval_accuracy,
+                    "eval/total_wins": eval_metrics.get("total_wins", 0),
+                    "eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
+                    "eval/num_examples": eval_metrics.get("num_examples", 0),
+                    "step": round_num
+                }
+                
+                # Add average scores
+                avg_scores = eval_metrics.get("average_scores", {})
+                for key, value in avg_scores.items():
+                    eval_wandb_log[f"eval/{key}"] = value
+                
+                wandb.log(eval_wandb_log)
             
             # Save metrics to eval log dir
             metrics_path = os.path.join(eval_log_dir, f'metrics_{round_num}.json')
@@ -637,6 +786,8 @@ if __name__ == "__main__":
                     'metrics': eval_metrics,
                     'accuracy': eval_accuracy
                 }, f, indent=4)
+            if args.enable_detailed_logging:
+                logger.info(f"Evaluation results saved to {metrics_path}")
 
         # Save checkpoint
         if (round_num + 1) % args.save_steps == 0:
@@ -648,12 +799,16 @@ if __name__ == "__main__":
                 'scheduler_state_dict': scheduler.state_dict(),
                 'train_metrics_total': train_metrics_total
             }, checkpoint_path)
+            if args.enable_detailed_logging:
+                logger.info(f"Checkpoint saved at round {round_num}: {checkpoint_path}")
 
         # Slowly update ref model
         if args.update_ref_model and (round_num+1) % args.update_ref_model_freq == 0:
             with torch.no_grad():
                 for param, ref_param in zip(model.parameters(), base_model.parameters()):
                     ref_param.data = args.ref_model_mixup_alpha * param.data + (1 - args.ref_model_mixup_alpha) * ref_param.data
+            if args.enable_detailed_logging:
+                logger.info(f"Reference model updated at round {round_num} with alpha={args.ref_model_mixup_alpha}")
 
         # Get next question
         question = next(train_loader)
@@ -669,12 +824,18 @@ if __name__ == "__main__":
         total_loss.backward()
         accumulated_loss += total_loss.item()
         scheduler.step()
+        
+        # Log training metrics periodically
+        if args.enable_detailed_logging and round_num % 50 == 0:
+            logger.info(f"Round {round_num}: loss={total_loss.item():.4f}, lr={scheduler.get_last_lr()[0]:.2e}")
 
         # Step optimizer
         if (round_num + 1) % args.gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
-            optimizer.zero_grad()    
+            optimizer.zero_grad()
+            if args.enable_detailed_logging and round_num % 100 == 0:
+                logger.info(f"Gradient step taken at round {round_num}, grad_norm={grad_norm:.4f}")    
 
         # Logs
         train_metrics["learning_rate"] = scheduler.get_last_lr()[0]
@@ -684,6 +845,32 @@ if __name__ == "__main__":
         train_metrics_total[round_num] = train_metrics
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
+            
+        # Log detailed metrics periodically
+        if args.enable_detailed_logging and round_num % 100 == 0 and 'rewards/strict_format' in train_metrics:
+            logger.info(f"Round {round_num} detailed metrics: ")
+            for key, value in train_metrics.items():
+                if key.startswith('rewards/'):
+                    logger.info(f"  {key}: {value:.4f}")
+        
+        # Log to wandb
+        if args.enable_wandb:
+            wandb_log = {
+                "train/loss": train_metrics.get("loss", 0),
+                "train/learning_rate": train_metrics.get("learning_rate", 0),
+                "train/grad_norm": train_metrics.get("grad_norm", 0),
+                "train/kl": train_metrics.get("kl", 0),
+                "train/response_length": train_metrics.get("response_length", 0),
+                "train/reward_std": train_metrics.get("reward_std", 0),
+                "step": round_num
+            }
+            
+            # Add reward metrics if available
+            for key, value in train_metrics.items():
+                if key.startswith('rewards/'):
+                    wandb_log[f"train/{key}"] = value
+            
+            wandb.log(wandb_log)
 
         # Add after each major operation in the training loop
         torch.cuda.empty_cache()
@@ -692,4 +879,11 @@ if __name__ == "__main__":
         if round_num % 10 == 0:  # Every 10 rounds
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+            
+    if args.enable_detailed_logging:
+        logger.info("Training completed successfully!")
+    
+    # Finish wandb run
+    if args.enable_wandb:
+        wandb.finish()
     

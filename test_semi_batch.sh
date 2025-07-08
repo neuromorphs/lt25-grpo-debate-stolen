@@ -9,11 +9,15 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --compare_model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --dataset_name "debate" \
     --evaluator "debate" \
-    --output_dir "debate_semi_batch_test" \
-    --num_train_iters 50 \
-    --eval_iterations 20 \
+    --output_dir "debate_semi_batch_test2" \
+    --num_train_iters 250 \
+    --eval_iterations 25 \
     --verbose \
-    --save_steps 5 \
+    --save_steps 25 \
     --num_chains 16 \
     --gradient_accumulation_steps 4 \
-    --use_semi_batch_judge
+    --use_semi_batch_judge \
+    --use_batch_generation \
+    --enable_detailed_logging \
+    --enable_wandb \
+    --wandb_project "grpo-debate" 
