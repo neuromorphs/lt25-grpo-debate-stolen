@@ -372,6 +372,86 @@ def score_completions(
 
     return rewards, advantages, rewards_per_func, metrics, log_data
 
+def score_contrastive_completions(
+    pro_completions_text: list[str],
+    con_completions_text: list[str],
+    question: str,
+    eval_class: evaluator.RewardEvaluator,
+    device: str,
+    args: argparse.Namespace
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float], dict]:
+    """
+    Score model completions and compute advantages for training.
+    
+    Args:
+        completions_text: List of generated completion strings
+        question: Original input question/prompt
+        answer: Ground truth answer
+        eval_class: Evaluator class for computing rewards
+        device: Device to place tensors on
+        args: Training arguments
+        
+    Returns:
+        rewards: Raw reward scores for each completion
+        advantages: Computed advantages for policy gradient
+        rewards_per_func: Rewards broken down by individual reward functions
+        metrics: Dictionary of aggregated metrics
+        log_data: Dictionary containing detailed generation and scoring data
+    """
+    # Build log data dictionary
+    log_data = {
+        'prompt': {
+            'text': question,
+        },
+        'generations': []
+    }
+
+    # Format inputs as expected by evaluator
+    # Get rewards and metrics from evaluator
+    rewards_per_func, metrics = eval_class.compute_rewards(
+        input_prompt=question,
+        all_models=all_models, 
+        train_model_completions=pro_completions_text,
+        compare_model_completions=con_completions_text, 
+        device=device, 
+        is_test=False,
+        use_batched_eval=args.use_batch_judge,
+        use_semi_batched_eval=args.use_semi_batch_judge
+    )
+    rewards = rewards_per_func.sum(dim=1)
+
+
+    # Store generation data
+    for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, rewards_per_func)):
+        generation_data = {
+            'response': completion,
+            'scores': {
+                **eval_class.get_reward_breakdown(reward_scores), # TODO: why do we sum before to then breakdown?
+                'total_reward': rewards[i].item()
+            }
+        }
+        log_data['generations'].append(generation_data)
+
+    # Compute advantages
+    mean_grouped_rewards = rewards.view(-1, args.num_chains).mean(dim=1)
+    std_grouped_rewards = rewards.view(-1, args.num_chains).std(dim=1)
+
+    mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+    std_grouped_rewards = std_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+
+    advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
+    metrics["reward_std"] = std_grouped_rewards.mean().item()
+
+    # Store summary statistics
+    log_data['summary_stats'] = {
+        'mean_rewards_per_group': mean_grouped_rewards.tolist(),
+        'std_rewards_per_group': std_grouped_rewards.tolist(),
+        'advantages': advantages.tolist()
+    }
+
+    return rewards, advantages, rewards_per_func, metrics, log_data
+
+
 def compute_loss(
     model: PreTrainedModel,
     base_model: PreTrainedModel, 
@@ -429,6 +509,115 @@ def compute_loss(
     metrics["kl"] = mean_kl.item()
 
     return loss, metrics
+
+def compute_contrastive_loss(
+    model: PreTrainedModel,
+    base_model: PreTrainedModel,
+    pro_prompt_completion_ids: torch.Tensor,
+    pro_prompt_ids: torch.Tensor,
+    pro_completion_ids: torch.Tensor,
+    pro_attention_mask: torch.Tensor,
+    pro_completion_mask: torch.Tensor,
+    pro_advantages: torch.Tensor,
+    con_prompt_completion_ids: torch.Tensor,
+    con_prompt_ids: torch.Tensor,
+    con_completion_ids: torch.Tensor,
+    con_attention_mask: torch.Tensor,
+    con_completion_mask: torch.Tensor,
+    con_advantages: torch.Tensor,
+    args: argparse.Namespace
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Compute the contrastive GRPO loss for cross-comparison setup between PRO and CON stances.
+    
+    Based on Multi-Prompt GRPO from GRPO-README.md, this computes loss for both PRO and CON
+    completions that are scored against each other in cross-comparison.
+    
+    Args:
+        model: The current model being trained
+        base_model: The reference model to compare against
+        pro_prompt_completion_ids: Combined prompt and completion token IDs for PRO stance
+        pro_prompt_ids: Token IDs for just the PRO prompt
+        pro_completion_ids: Token IDs for just the PRO completion
+        pro_attention_mask: Attention mask for the PRO full sequence
+        pro_completion_mask: Mask indicating which tokens are from the PRO completion
+        pro_advantages: Advantage values for each PRO sequence
+        con_prompt_completion_ids: Combined prompt and completion token IDs for CON stance
+        con_prompt_ids: Token IDs for just the CON prompt
+        con_completion_ids: Token IDs for just the CON completion
+        con_attention_mask: Attention mask for the CON full sequence
+        con_completion_mask: Mask indicating which tokens are from the CON completion
+        con_advantages: Advantage values for each CON sequence
+        args: Training arguments
+        
+    Returns:
+        loss: The computed contrastive GRPO loss (sum of PRO and CON losses)
+        metrics: Dictionary containing additional metrics like KL divergence for both stances
+    """
+    
+    # Compute PRO stance loss
+    pro_logits_to_keep = pro_completion_ids.size(1)
+    
+    # Get reference model logits for PRO
+    with torch.inference_mode():
+        pro_ref_per_token_logps = utils.get_per_token_logps(base_model, pro_prompt_completion_ids, pro_attention_mask, pro_logits_to_keep)
+    
+    # Get training model logits for PRO
+    pro_input_ids = torch.cat([pro_prompt_ids, pro_completion_ids], dim=1)
+    pro_per_token_logps = utils.get_per_token_logps(model, pro_input_ids, pro_attention_mask, pro_logits_to_keep)
+    
+    # Compute KL divergence for PRO
+    pro_per_token_kl = torch.exp(pro_ref_per_token_logps - pro_per_token_logps) - (pro_ref_per_token_logps - pro_per_token_logps) - 1
+    
+    # Compute loss with advantages for PRO
+    pro_per_token_loss = torch.exp(pro_per_token_logps - pro_per_token_logps.detach()) * pro_advantages.unsqueeze(1)
+    pro_per_token_loss = -(pro_per_token_loss - args.kl_weight_beta * pro_per_token_kl)
+    pro_loss = ((pro_per_token_loss * pro_completion_mask).sum(dim=1) / pro_completion_mask.sum(dim=1)).mean()
+    
+    # Compute CON stance loss
+    con_logits_to_keep = con_completion_ids.size(1)
+    
+    # Get reference model logits for CON
+    with torch.inference_mode():
+        con_ref_per_token_logps = utils.get_per_token_logps(base_model, con_prompt_completion_ids, con_attention_mask, con_logits_to_keep)
+    
+    # Get training model logits for CON
+    con_input_ids = torch.cat([con_prompt_ids, con_completion_ids], dim=1)
+    con_per_token_logps = utils.get_per_token_logps(model, con_input_ids, con_attention_mask, con_logits_to_keep)
+    
+    # Compute KL divergence for CON
+    con_per_token_kl = torch.exp(con_ref_per_token_logps - con_per_token_logps) - (con_ref_per_token_logps - con_per_token_logps) - 1
+    
+    # Compute loss with advantages for CON
+    con_per_token_loss = torch.exp(con_per_token_logps - con_per_token_logps.detach()) * con_advantages.unsqueeze(1)
+    con_per_token_loss = -(con_per_token_loss - args.kl_weight_beta * con_per_token_kl)
+    con_loss = ((con_per_token_loss * con_completion_mask).sum(dim=1) / con_completion_mask.sum(dim=1)).mean()
+    
+    # Combined loss as sum over both prompt groups (following Multi-Prompt GRPO formula)
+    total_loss = pro_loss + con_loss
+    
+    # Additional metrics
+    metrics = {}
+    
+    # PRO stance metrics
+    pro_response_length = pro_completion_mask.sum(1).float().mean().item()
+    metrics["pro_response_length"] = pro_response_length
+    pro_mean_kl = ((pro_per_token_kl * pro_completion_mask).sum(dim=1) / pro_completion_mask.sum(dim=1)).mean()
+    metrics["pro_kl"] = pro_mean_kl.item()
+    
+    # CON stance metrics  
+    con_response_length = con_completion_mask.sum(1).float().mean().item()
+    metrics["con_response_length"] = con_response_length
+    con_mean_kl = ((con_per_token_kl * con_completion_mask).sum(dim=1) / con_completion_mask.sum(dim=1)).mean()
+    metrics["con_kl"] = con_mean_kl.item()
+    
+    # Combined metrics
+    metrics["total_response_length"] = (pro_response_length + con_response_length) / 2
+    metrics["total_kl"] = (pro_mean_kl + con_mean_kl).item() / 2
+    metrics["pro_loss"] = pro_loss.item()
+    metrics["con_loss"] = con_loss.item()
+    
+    return total_loss, metrics
 
 def grpo_loss(
         train_loader,
@@ -492,6 +681,86 @@ def grpo_loss(
 
     return loss, metrics
 
+def grpo_contrastive_loss(
+        train_loader,
+        all_models: dict,
+        question: str,
+        eval_class: evaluator.RewardEvaluator,
+        device: str,
+        round_num: int,
+        training_log_dir: str, 
+        args: argparse.Namespace
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Compute contrastive GRPO loss between PRO and CON stances.
+    
+    Args:
+        train_loader: Training data loader
+        all_models: Dictionary of all models
+        question: Input question/prompt
+        eval_class: Evaluator for computing rewards
+        device: Device to run on ('cpu' or 'cuda')
+        round_num: Current training round number
+        training_log_dir: Directory to save training logs
+        args: Training arguments
+        
+    Returns:
+        loss: The computed contrastive GRPO loss
+        metrics: Dictionary containing training metrics
+    """
+
+    prompt_candidate = [
+        {'role': 'system', 'content': train_loader.pre_prompt},
+        {'role': 'user', 'content': question + "Position: PRO"}
+    ]
+    prompt_opponent = [
+        {'role': 'system', 'content': train_loader.pre_prompt},
+        {'role': 'user', 'content': question + "Position: CON"}
+    ]
+
+    prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(prompt_candidate, tokenize=False)
+    prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(prompt_opponent, tokenize=False)
+    # print(f"Generating completions for PRO prompt: {prompt_text_candidate}")
+    # print(f"Generating completions for CON prompt: {prompt_text_opponent}")
+
+    # Generate completions
+    pro_prompt_completion_ids, pro_prompt_ids, pro_completion_ids, pro_attention_mask, pro_completions_text, _ = generate_completions(
+        all_models["training_model"], all_models["training_model_tokenizer"], prompt_text_candidate, device, args
+    )
+    con_prompt_completion_ids, con_prompt_ids, con_completion_ids, con_attention_mask, con_completions_text, _ = generate_completions(
+        all_models["training_model"], all_models["training_model_tokenizer"], prompt_text_opponent, device, args
+    )
+    
+    # Score completions (cross-comparison between PRO and CON)
+    pro_rewards, pro_advantages, pro_rewards_per_func, pro_metrics, pro_log_data = score_contrastive_completions(
+        pro_completions_text, con_completions_text, prompt_text_candidate, eval_class, device, args
+    )
+    con_rewards, con_advantages, con_rewards_per_func, con_metrics, con_log_data = score_contrastive_completions(
+        con_completions_text, pro_completions_text, prompt_text_opponent, eval_class, device, args
+    )
+
+    # Write log data
+    log_file = os.path.join(training_log_dir, f'{round_num}_contrastive_generations.txt')
+    utils.write_contrastive_generation_log(pro_log_data, con_log_data, log_file)
+
+    # Compute contrastive loss
+    pro_completion_mask = pro_attention_mask[:, pro_prompt_ids.size(1):]
+    con_completion_mask = con_attention_mask[:, con_prompt_ids.size(1):]
+    
+    loss, loss_metrics = compute_contrastive_loss(
+        all_models["training_model"], all_models["base_model"], 
+        pro_prompt_completion_ids, pro_prompt_ids, pro_completion_ids, 
+        pro_attention_mask, pro_completion_mask, pro_advantages,
+        con_prompt_completion_ids, con_prompt_ids, con_completion_ids,
+        con_attention_mask, con_completion_mask, con_advantages, args
+    )
+
+    # Combine metrics
+    combined_metrics = {**pro_metrics, **con_metrics, **loss_metrics}
+
+    return loss, combined_metrics
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="GRPO training arguments")
     
@@ -539,6 +808,7 @@ def parse_args():
     parser.add_argument("--num_train_iters", type=int, default=1000, help="Number of training iterations")
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
+    parser.add_argument("--use_contrastive", action="store_true", help="Use contrastive GRPO training (PRO vs CON)")
 
     args = parser.parse_args()
     return args
@@ -655,7 +925,7 @@ if __name__ == "__main__":
     ## Set which data set 
     if args.enable_detailed_logging:
         logger.info(f"Loading dataset: {args.dataset_name}")
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
+    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, args.use_contrastive,)
     if args.enable_detailed_logging:
         logger.info(f"Dataset loaded successfully")
 
@@ -790,7 +1060,7 @@ if __name__ == "__main__":
                 logger.info(f"Evaluation results saved to {metrics_path}")
 
         # Save checkpoint
-        if (round_num + 1) % args.save_steps == 0:
+        if (round_num + 1) % args.save_steps == 0 or round_num == args.num_train_iters - 1:
             checkpoint_path = os.path.join(checkpoint_dir, f'step_{round_num}.pt')
             torch.save({
                 'round_num': round_num,
@@ -816,8 +1086,17 @@ if __name__ == "__main__":
         # Clear cache before GRPO
         torch.cuda.empty_cache()
         
+        #=======================================================================================================================
+        #==============================================      TRAINING CALL       ===============================================
+        #=======================================================================================================================
+        print(question)
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, device, round_num, train_log_dir, args)
+        if args.use_contrastive:
+            total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, eval_class, 
+                                                            device, round_num, train_log_dir, args)
+        else:
+            total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, 
+                                                device, round_num, train_log_dir, args)
         
         # Gradient accumulation
         total_loss = total_loss

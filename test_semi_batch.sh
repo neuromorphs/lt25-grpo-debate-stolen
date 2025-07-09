@@ -3,7 +3,7 @@
 
 echo "Testing semi-batched judge evaluation..."
 
-CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
+CUDA_VISIBLE_DEVICES=2 uv run python main.py \
     --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --judge_model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --compare_model_name "Qwen/Qwen2.5-1.5B-Instruct" \
@@ -14,7 +14,7 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --eval_iterations 25 \
     --verbose \
     --save_steps 25 \
-    --num_chains 16 \
+    --num_chains 4 \
     --gradient_accumulation_steps 4 \
     --use_semi_batch_judge \
     --use_batch_generation \

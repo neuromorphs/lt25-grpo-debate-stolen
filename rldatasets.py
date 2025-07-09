@@ -79,9 +79,10 @@ class DebateDataLoader(DataLoader):
         system_prompt (str): System prompt to guide the model's responses
     """
     
-    def __init__(self, topics: list[str], random: bool = False) -> None:
+    def __init__(self, topics: list[str], random: bool = False, contrastive: bool = False) -> None:
         super().__init__(random)
         self.topics = topics
+        self.contrastive = contrastive  # If True, no position is assigned, just the topic
         self.pre_prompt = """You will be given a debate topic and your position (PRO or CON). You should reason carefully about the position, then provide your argument.
             It is very important that you put your reasoning process inside <reasoning> tags and your final argument inside <answer> tags, like this:
 
@@ -113,16 +114,17 @@ class DebateDataLoader(DataLoader):
             self.current_index += 1
             
         topic = self.topics[idx]
-        position = random.choice(["PRO", "CON"])
-        
-        # Format the question to include both topic and position
-        formatted_question = f"Debate Topic: {topic}\nPosition: {position}"
+        formatted_question = f"Debate Topic: {topic}\n"
+        if not self.contrastive: 
+            position = random.choice(["PRO", "CON"])
+            formatted_question += f"Position: {position}\n"
         
         # The "answer" in this case is the position, which is needed for evaluation
         return formatted_question
 
     def reset(self):
         self.current_index = 0
+
 
 
 def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
@@ -194,6 +196,78 @@ def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
     # Create data loaders
     trainloader = DebateDataLoader(train_topics, random=True)
     testloader = DebateDataLoader(test_topics, random=False)
+    
+    return trainloader, testloader
+
+def build_debate_contrastive_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
+    # Define debate topics - non-controversial but engaging topics
+    topics = [
+        "Video games should be taught as a school sport",
+        "All schools should have mandatory cooking classes",
+        "Homework should be replaced with project-based learning",
+        "Every city should have a night market",
+        "Movie theaters should have special quiet showings",
+        "All schools should teach sign language",
+        "Restaurants should offer smaller portion options",
+        "Public spaces should have musical instruments",
+        "All high schools should start after 9am",
+        "Zoos should focus only on local wildlife",
+        "Libraries should have recording studios",
+        "Every workplace should allow pets",
+        "Schools should teach financial literacy",
+        "All restaurants should show calorie counts",
+        "Museums should be open late on weekends",
+        "Cities should have designated graffiti walls",
+        "Schools should teach basic coding",
+        "Grocery stores should have recipe stations",
+        "All buildings should have rooftop gardens",
+        "Cafes should have board game nights",
+        "Libraries should offer virtual reality rooms",
+        "Parks should have outdoor movie screens",
+        "Schools should teach meditation",
+        "Restaurants should compost food waste",
+        "Cities should have more water fountains",
+        "All schools should have maker spaces",
+        "Gyms should offer childcare",
+        "Libraries should loan art pieces",
+        "Hotels should adopt shelter pets",
+        "Schools should teach gardening",
+        "Airports should have sleeping pods",
+        "Malls should have indoor gardens",
+        "Restaurants should grow their own herbs",
+        "Cities should have free music venues",
+        "Schools should teach public speaking",
+        "Offices should have nap rooms",
+        "Supermarkets should have tasting stations",
+        "Libraries should have podcast studios",
+        "Parks should have outdoor chess tables",
+        "Schools should teach time management",
+        "Restaurants should offer cooking classes",
+        "Cities should have stargazing areas",
+        "Beaches should have free sunscreen",
+        "Schools should teach digital citizenship",
+        "Hotels should have community spaces",
+        "Parks should have fruit trees",
+        "Libraries should offer language exchanges",
+        "Theaters should have subtitle options",
+        "Schools should teach environmental science",
+        "Cities should have interactive art installations"
+    ]
+    # Split into train/test sets (85/15 split)
+    total_topics = len(topics)
+    test_size = int(total_topics * 0.15)
+    
+    # Generate random indices for test set
+    test_indices = random.sample(range(total_topics), test_size)
+    test_indices_set = set(test_indices)
+    
+    # Split topics
+    train_topics = [t for i, t in enumerate(topics) if i not in test_indices_set]
+    test_topics = [topics[i] for i in test_indices]
+    
+    # Create data loaders
+    trainloader = DebateDataLoader(train_topics, random=True, contrastive=True)
+    testloader = DebateDataLoader(test_topics, random=False, contrastive=True)
     
     return trainloader, testloader
 
@@ -460,7 +534,7 @@ def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
     return trainloader, testloader
 
 
-def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
+def get_dataloaders(dataset_name: str, contrastive: bool = False) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
@@ -474,7 +548,7 @@ def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
         ValueError: If dataset_name is not supported
     """
     if dataset_name.lower() == 'debate':
-        return build_debate_dataloaders()
+        return build_debate_contrastive_dataloaders() if contrastive else build_debate_dataloaders()
     elif dataset_name.lower() == 'ld':
         return build_ld_dataloaders()
     elif dataset_name.lower() == 'chopped':

@@ -80,6 +80,130 @@ def write_generation_log(log_data: Dict[str, Any], log_file: str) -> None:
             f.write("-"*40 + "\n\n")
 
 
+def write_contrastive_generation_log(pro_log_data: Dict[str, Any], con_log_data: Dict[str, Any], log_file: str) -> None:
+    """
+    Write contrastive generation log data (PRO vs CON) to a text file.
+
+    Args:
+        pro_log_data: Dictionary containing PRO prompt and generation data
+        con_log_data: Dictionary containing CON prompt and generation data
+        log_file: Path to output log file
+    """
+    with open(log_file, 'w') as f:
+        # Write header
+        f.write("=" * 80 + "\n")
+        f.write("CONTRASTIVE GENERATION LOG - PRO vs CON\n")
+        f.write("=" * 80 + "\n\n")
+        
+        # Write base question
+        f.write("###### BASE QUESTION #####\n\n")
+        # Extract base question from chat template
+        pro_prompt_text = pro_log_data['prompt']['text']
+        
+        # Extract the debate topic from the chat template
+        if "Debate Topic:" in pro_prompt_text:
+            # Find the line with "Debate Topic:"
+            lines = pro_prompt_text.split('\n')
+            for line in lines:
+                if "Debate Topic:" in line:
+                    # Extract just the topic part
+                    topic_line = line.strip()
+                    # Remove any position information
+                    topic_line = topic_line.replace("Position: PRO", "").replace("Position: CON", "")
+                    base_question = topic_line.strip()
+                    break
+            else:
+                base_question = "Could not extract debate topic"
+        else:
+            base_question = pro_prompt_text
+            
+        f.write(base_question + "\n\n")
+
+        # Write PRO section
+        f.write("=" * 40 + " PRO STANCE " + "=" * 40 + "\n\n")
+        f.write("###### PRO PROMPT #####\n\n")
+        f.write(pro_log_data['prompt']['text'] + "\n\n")
+
+        # Write PRO generations
+        for i, gen in enumerate(pro_log_data['generations'], 1):
+            f.write(f"#### PRO GENERATION {i} ####\n\n")
+            f.write("RESPONSE:\n")
+            f.write(gen['response'] + "\n\n")
+            
+            # Parse XML sections if present
+            try:
+                reasoning = gen['response'].split("<reasoning>\n")[1].split("\n</reasoning>")[0]
+                answer = gen['response'].split("<answer>\n")[1].split("\n</answer>")[0]
+                f.write("PARSED SECTIONS:\n")
+                f.write(f"Reasoning:\n{reasoning}\n")
+                f.write(f"Answer:\n{answer}\n\n")
+            except:
+                f.write("ERROR: Could not parse XML sections\n\n")
+            
+            # Write reward scores
+            f.write("REWARD SCORES:\n")
+            for reward_name, reward_value in gen['scores'].items():
+                f.write(f"{reward_name}: {reward_value:.4f}\n")
+            f.write("\n")
+            f.write("-"*40 + "\n\n")
+
+        # Write CON section
+        f.write("=" * 40 + " CON STANCE " + "=" * 40 + "\n\n")
+        f.write("###### CON PROMPT #####\n\n")
+        f.write(con_log_data['prompt']['text'] + "\n\n")
+
+        # Write CON generations
+        for i, gen in enumerate(con_log_data['generations'], 1):
+            f.write(f"#### CON GENERATION {i} ####\n\n")
+            f.write("RESPONSE:\n")
+            f.write(gen['response'] + "\n\n")
+            
+            # Parse XML sections if present
+            try:
+                reasoning = gen['response'].split("<reasoning>\n")[1].split("\n</reasoning>")[0]
+                answer = gen['response'].split("<answer>\n")[1].split("\n</answer>")[0]
+                f.write("PARSED SECTIONS:\n")
+                f.write(f"Reasoning:\n{reasoning}\n")
+                f.write(f"Answer:\n{answer}\n\n")
+            except:
+                f.write("ERROR: Could not parse XML sections\n\n")
+            
+            # Write reward scores
+            f.write("REWARD SCORES:\n")
+            for reward_name, reward_value in gen['scores'].items():
+                f.write(f"{reward_name}: {reward_value:.4f}\n")
+            f.write("\n")
+            f.write("-"*40 + "\n\n")
+
+        # Write summary statistics if available
+        if 'summary_stats' in pro_log_data and 'summary_stats' in con_log_data:
+            f.write("=" * 30 + " SUMMARY STATISTICS " + "=" * 30 + "\n\n")
+            
+            f.write("PRO STANCE STATS:\n")
+            pro_stats = pro_log_data['summary_stats']
+            if 'advantages' in pro_stats:
+                f.write(f"Advantages: {pro_stats['advantages']}\n")
+            if 'mean_rewards_per_group' in pro_stats:
+                f.write(f"Mean rewards: {pro_stats['mean_rewards_per_group']}\n")
+            if 'std_rewards_per_group' in pro_stats:
+                f.write(f"Std rewards: {pro_stats['std_rewards_per_group']}\n")
+            f.write("\n")
+            
+            f.write("CON STANCE STATS:\n")
+            con_stats = con_log_data['summary_stats']
+            if 'advantages' in con_stats:
+                f.write(f"Advantages: {con_stats['advantages']}\n")
+            if 'mean_rewards_per_group' in con_stats:
+                f.write(f"Mean rewards: {con_stats['mean_rewards_per_group']}\n")
+            if 'std_rewards_per_group' in con_stats:
+                f.write(f"Std rewards: {con_stats['std_rewards_per_group']}\n")
+            f.write("\n")
+
+        f.write("=" * 80 + "\n")
+        f.write("END OF CONTRASTIVE GENERATION LOG\n")
+        f.write("=" * 80 + "\n")
+
+
 ####################################################################################
 ## Copied Directly from TRL -> generate log probs per token                 ########
 ## https://github.com/huggingface/trl/blob/main/trl/trainer/grpo_trainer.py ########
