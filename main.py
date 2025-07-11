@@ -66,16 +66,25 @@ def eval_on_test_set(
             # 1. Prepare prompting
             if args.use_contrastive:
                 if args.dataset_name == "code_debate":
-                    # For code_debate, test with the correct position
+                    # For code_debate, randomly sample between defending correct answer or a random incorrect answer
+                    if torch.rand(1).item() < 0.5:
+                        # Defend correct answer
+                        chosen_idx = correct_idx
+                    else:
+                        # Defend a random incorrect answer
+                        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
+                        chosen_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
+                    
                     prompt = [
                         {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
+                        {'role': 'user', 'content': question + f"Position: {choices[chosen_idx]}"}
                     ]
                 else:
-                    # For other datasets, use PRO position for evaluation
+                    # For other datasets, randomly sample between PRO and CON positions
+                    position = "PRO" if torch.rand(1).item() < 0.5 else "CON"
                     prompt = [
                         {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question + "Position: PRO"}
+                        {'role': 'user', 'content': question + f"Position: {position}"}
                     ]
             else:
                 prompt = [
@@ -97,12 +106,33 @@ def eval_on_test_set(
                 all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
             )
 
+            # Modify user prompt based on dataset type and requirements
+            if args.use_contrastive:
+                if args.dataset_name == "code_debate":
+                    # For code_debate, if the correct answer was chosen for training, use the opposite (incorrect) for compare
+                    if chosen_idx == correct_idx:
+                        # Training model defended correct answer, compare model should defend incorrect
+                        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
+                        compare_chosen_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
+                    else:
+                        # Training model defended incorrect answer, compare model should defend correct
+                        compare_chosen_idx = correct_idx
+                    
+                    compare_user_prompt = question + f"Position: {choices[compare_chosen_idx]}"
+                else:
+                    # For pro/con datasets, take the opposite position
+                    compare_position = "CON" if position == "PRO" else "PRO"
+                    compare_user_prompt = question + f"Position: {compare_position}"
+            else:
+                # Use original question for non-contrastive mode
+                compare_user_prompt = question
+
             # Generate completions for compare model using batched interface
             if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
                 # Use efficient batched generation for HuggingFace models (e.g., Qwen)
                 compare_completions_text = all_models["compare_model"].generate_batch(
                     system_prompt=test_loader.pre_prompt,
-                    user_prompt=question,
+                    user_prompt=compare_user_prompt,
                     num_completions=args.num_chains,
                     max_new_tokens=args.max_completion_length,
                     temperature=args.temperature
@@ -113,7 +143,7 @@ def eval_on_test_set(
                 for _ in range(args.num_chains):
                     completion = all_models["compare_model"].generate(
                         system_prompt=test_loader.pre_prompt,
-                        user_prompt=question,
+                        user_prompt=compare_user_prompt,
                         max_new_tokens=args.max_completion_length,
                         temperature=args.temperature
                     )
