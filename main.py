@@ -51,8 +51,16 @@ def eval_on_test_set(
         total_comparisons = 0
         total_wins = 0
         
-        for question in tqdm(test_loader, desc="Evaluating on test set"):
+        for item in tqdm(test_loader, desc="Evaluating on test set"):
+            # Handle different dataset formats
+            if args.dataset_name.lower() == "gsm8k":
+                question, gold_answer = item  # GSM8K returns tuple
+            else:
+                question = item  # Other datasets return just question
+                gold_answer = None
+            
             num_examples += 1
+
             if contrastive:
                 position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
                 question = question + f'Position: {position}'  # Append stance to question
@@ -98,17 +106,32 @@ def eval_on_test_set(
                     )
                     compare_completions_text.append(completion)
 
-            # Score completions to get reward metrics
-            rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=question, 
-                all_models=all_models, 
-                train_model_completions=completions_text, 
-                compare_model_completions=compare_completions_text,
-                device=device,
-                is_test=True,
-                use_batched_eval=args.use_batch_judge,
-                use_semi_batched_eval=args.use_semi_batch_judge
-            )
+            if args.dataset_name.lower() == "gsm8k":
+                # When computing rewards, pass the gold answer
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=question, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    gold_answer=gold_answer,  # Pass gold answer for GSM8K
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge
+                )
+            else:
+                # Score completions to get reward metrics
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=question, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge
+                )
+
 
             # Track total comparisons and wins
             comparisons_this_question = len(completions_text)

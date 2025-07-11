@@ -31,7 +31,8 @@ class RewardEvaluator(ABC):
         prompts: List[List[Dict[str, str]]],
         completions: List[List[Dict[str, str]]],
         answer: Any,
-        device: str
+        device: str,
+        gold_answer: Any = None,  # Add this parameter
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Compute rewards for a batch of completions.
@@ -1399,11 +1400,11 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
         }
         return r, metrics
 
-    # For now we reuse training logic for test; customise if needed later.
-    def _compute_test_rewards(
-        self, prompt, all_models, completions, compare_completions, device
-    ):
-        return self._compute_train_rewards(prompt, all_models, completions, device)
+    # # For now we reuse training logic for test; customise if needed later.
+    # def _compute_test_rewards(
+    #     self, prompt, all_models, completions, compare_completions, device
+    # ):
+    #     return self._compute_train_rewards(prompt, all_models, completions, device)
 
     # public dispatcher ------------------------------------------------------
     def compute_rewards(
@@ -1414,6 +1415,7 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
         compare_model_completions=None,
         device: str = "cuda",
         is_test: bool = False,
+        gold_answer: str = None,  # Add parameter
         **kwargs,
     ):
         if is_test:
@@ -1423,12 +1425,12 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
                 train_model_completions,
                 compare_model_completions,
                 device,
+                gold_answer=gold_answer,  # Pass it through
             )
-        # training path unchanged
+        # Training path unchanged - still uses judge
         return self._compute_train_rewards(
             input_prompt, all_models, train_model_completions, device
         )
-
     # ───────────────────────────────────────────────────────────────
     #  test-time head-to-head vs a baseline model
     # ───────────────────────────────────────────────────────────────
@@ -1439,49 +1441,130 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
         trained_completions: list[str],
         baseline_completions: list[str],
         device: str,
+        gold_answer: str = None,  # Add gold answer parameter
     ):
-        """Judge each trained-vs-baseline pair once and add win-metrics keys."""
+        """Evaluate based on correctness against gold answer during testing."""
         n = len(trained_completions)
         rewards = torch.zeros(n, self.num_reward_functions, device=device)
         wins = 0
-
-        question = prompt.split("Question:\n", 1)[-1]
-
-        for i in range(n):
-            judge_prompt = self.judge_prompt.format(
-                question=question,
-                sol1=trained_completions[i],
-                sol2=baseline_completions[i],
+        
+        if gold_answer is None:
+            # Fall back to judge-based evaluation if no gold answer
+            return self._compute_test_rewards_judge_based(
+                prompt, all_models, trained_completions, baseline_completions, device
             )
-
-            decision = all_models["judge_model"].generate(
-                system_prompt="You are an expert elementary-math teacher.",
-                user_prompt=judge_prompt,
-                max_new_tokens=30,
-                temperature=0.1,
-            ).strip().upper()
-
-            if "SOLUTION_1_WINS" in decision:
+        
+        # Extract answers and check correctness
+        for i in range(n):
+            # Extract answer from trained model's completion
+            trained_answer = self._extract_xml_answer(trained_completions[i]).strip()
+            
+            # Check if the trained model got it correct
+            trained_correct = self._check_answer_correctness(trained_answer, gold_answer)
+            
+            # Extract answer from baseline model's completion  
+            baseline_answer = self._extract_xml_answer(baseline_completions[i]).strip()
+            baseline_correct = self._check_answer_correctness(baseline_answer, gold_answer)
+            
+            # Assign win based on correctness
+            if trained_correct and not baseline_correct:
                 wins += 1
-                rewards[i, 0] = 1.0   # +1 for a win
-
-            # XML-format rewards for this completion
+                rewards[i, 0] = 1.0
+            elif trained_correct and baseline_correct:
+                # Both correct - could use judge as tiebreaker or give partial credit
+                rewards[i, 0] = 0.5  # Or use judge to break tie
+            # If trained is wrong, it gets 0 (default)
+            
+            # XML-format rewards remain the same
             rewards[i, 1] = self._strict_format_reward([trained_completions[i]])[0]
-            rewards[i, 2] = self._soft_format_reward  ([trained_completions[i]])[0]
-            rewards[i, 3] = self._xml_count_reward   ([trained_completions[i]])[0]
-
+            rewards[i, 2] = self._soft_format_reward([trained_completions[i]])[0]
+            rewards[i, 3] = self._xml_count_reward([trained_completions[i]])[0]
+        
         win_rate = wins / n
         metrics = {
             "num_wins": wins,
             "num_comparisons": n,
             "win_rate": win_rate,
             "rewards/strict_format": rewards[:, 1].mean().item(),
-            "rewards/soft_format":  rewards[:, 2].mean().item(),
-            "rewards/xml_count":    rewards[:, 3].mean().item(),
+            "rewards/soft_format": rewards[:, 2].mean().item(),
+            "rewards/xml_count": rewards[:, 3].mean().item(),
             "reward": rewards.mean().item(),
         }
         return rewards, metrics
 
+    def _check_answer_correctness(self, predicted: str, gold: str) -> bool:
+        """Check if predicted answer matches gold answer."""
+        # Normalize both answers
+        predicted = predicted.strip().lower()
+        gold = gold.strip().lower()
+        
+        # Remove common formatting
+        for char in [",", "$", "%"]:
+            predicted = predicted.replace(char, "")
+            gold = gold.replace(char, "")
+        
+        # Direct match
+        if predicted == gold:
+            return True
+        
+        # Try numeric comparison
+        try:
+            pred_num = float(predicted)
+            gold_num = float(gold)
+            return abs(pred_num - gold_num) < 1e-6
+        except:
+            return False
+
+    # Keep the old judge-based method as fallback
+    def _compute_test_rewards_judge_based(
+            self,
+            prompt: str,
+            all_models: dict[str, Any],
+            trained_completions: list[str],
+            baseline_completions: list[str],
+            device: str,
+        ):
+            """Judge each trained-vs-baseline pair once and add win-metrics keys."""
+            n = len(trained_completions)
+            rewards = torch.zeros(n, self.num_reward_functions, device=device)
+            wins = 0
+
+            question = prompt.split("Question:\n", 1)[-1]
+
+            for i in range(n):
+                judge_prompt = self.judge_prompt.format(
+                    question=question,
+                    sol1=trained_completions[i],
+                    sol2=baseline_completions[i],
+                )
+
+                decision = all_models["judge_model"].generate(
+                    system_prompt="You are an expert elementary-math teacher.",
+                    user_prompt=judge_prompt,
+                    max_new_tokens=30,
+                    temperature=0.1,
+                ).strip().upper()
+
+                if "SOLUTION_1_WINS" in decision:
+                    wins += 1
+                    rewards[i, 0] = 1.0   # +1 for a win
+
+                # XML-format rewards for this completion
+                rewards[i, 1] = self._strict_format_reward([trained_completions[i]])[0]
+                rewards[i, 2] = self._soft_format_reward  ([trained_completions[i]])[0]
+                rewards[i, 3] = self._xml_count_reward   ([trained_completions[i]])[0]
+
+            win_rate = wins / n
+            metrics = {
+                "num_wins": wins,
+                "num_comparisons": n,
+                "win_rate": win_rate,
+                "rewards/strict_format": rewards[:, 1].mean().item(),
+                "rewards/soft_format":  rewards[:, 2].mean().item(),
+                "rewards/xml_count":    rewards[:, 3].mean().item(),
+                "reward": rewards.mean().item(),
+            }
+            return rewards, metrics
 
     def get_reward_breakdown(self, rewards: torch.Tensor) -> dict[str, float]:
         return {

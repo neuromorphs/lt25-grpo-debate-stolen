@@ -607,7 +607,7 @@ class GSM8KDataLoader(DataLoader):
     def __iter__(self) -> "GSM8KDataLoader":
         return self
 
-    def __next__(self) -> str:     # <- just a string, no tuple
+    def __next__(self) -> tuple[str, str]:  # Return tuple instead of just str
         if self.current_index >= len(self.examples):
             raise StopIteration
 
@@ -617,8 +617,9 @@ class GSM8KDataLoader(DataLoader):
 
         ex = self.examples[idx]
         question = ex["question"]
-
-        self.last_gold = extract_hash_answer(ex["answer"])
+        
+        # Extract gold answer
+        gold_answer = extract_hash_answer(ex["answer"])
 
         prompt = (
             "Solve the following grade-school math word problem.\n"
@@ -626,7 +627,8 @@ class GSM8KDataLoader(DataLoader):
             "<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>\n\n"
             f"Question:\n{question}"
         )
-        return prompt
+        
+        return prompt, gold_answer  # Return both prompt and gold answer
 
     # optional helper
     def reset(self) -> None:
