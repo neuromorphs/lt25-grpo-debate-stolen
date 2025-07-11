@@ -245,6 +245,7 @@ def generate_completions(
     """
 
     # Tokenize
+    #print(prompt_text)
     prompt_inputs = tokenizer(prompt_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False)
     prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
 
@@ -430,13 +431,16 @@ def score_contrastive_completions(
         use_semi_batched_eval=args.use_semi_batch_judge
     )
     pro_first_rewards_per_func[:, 0] += first_second_debate_score
+    pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
     con_first_rewards_per_func[:, 0] += con_second_debate_score
+    con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
     pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
     con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
 
     # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
     # Store generation data
     for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, pro_first_rewards_per_func)):
+        print(completion)
         generation_data = {
             'response': completion,
             'scores': {
@@ -446,6 +450,7 @@ def score_contrastive_completions(
         }
         log_data['pro_generations'].append(generation_data)
     for i, (completion, reward_scores) in enumerate(zip(con_completions_text, con_first_rewards_per_func)):
+        print(completion)
         generation_data = {
             'response': completion,
             'scores': {
@@ -609,14 +614,20 @@ def compute_contrastive_loss(
     
     # PRO stance metrics
     pro_response_length = pro_completion_mask.sum(1).float().mean().item()
+    print(f"PRO response length: {pro_response_length}")
+    print(f"PRO PER TOKEN KL: {pro_per_token_kl}")
     metrics["pro_response_length"] = pro_response_length
     pro_mean_kl = ((pro_per_token_kl * pro_completion_mask).sum(dim=1) / pro_completion_mask.sum(dim=1)).mean()
+    print(f"PRO mean KL: {pro_mean_kl}")
     metrics["pro_kl"] = pro_mean_kl.item()
     
     # CON stance metrics  
     con_response_length = con_completion_mask.sum(1).float().mean().item()
+    print(f"CON response length: {con_response_length}")
+    print(f"CON PER TOKEN KL: {con_per_token_kl}")
     metrics["con_response_length"] = con_response_length
     con_mean_kl = ((con_per_token_kl * con_completion_mask).sum(dim=1) / con_completion_mask.sum(dim=1)).mean()
+    print(f"CON mean KL: {con_mean_kl}")
     metrics["con_kl"] = con_mean_kl.item()
     
     # Combined metrics
@@ -717,17 +728,17 @@ def grpo_contrastive_loss(
         metrics: Dictionary containing training metrics
     """
 
-    prompt_candidate = [
+    pro_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
         {'role': 'user', 'content': question + "Position: PRO"}
     ]
-    prompt_opponent = [
+    con_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
         {'role': 'user', 'content': question + "Position: CON"}
     ]
 
-    prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(prompt_candidate, tokenize=False)
-    prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(prompt_opponent, tokenize=False)
+    prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(pro_prompt, tokenize=False)
+    prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(con_prompt, tokenize=False)
     # print(f"Generating completions for PRO prompt: {prompt_text_candidate}")
     # print(f"Generating completions for CON prompt: {prompt_text_opponent}")
 
@@ -741,7 +752,7 @@ def grpo_contrastive_loss(
     
     # Score completions (cross-comparison between PRO and CON)
     pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data = score_contrastive_completions(
-        pro_completions_text, con_completions_text, prompt_text_candidate, eval_class, device, args
+        pro_completions_text, con_completions_text, question, eval_class, device, args
     )
 
     def compute_contrastive_advantages(
@@ -1209,6 +1220,16 @@ if __name__ == "__main__":
                 "train/kl": train_metrics.get("kl", 0),
                 "train/response_length": train_metrics.get("response_length", 0),
                 "train/reward_std": train_metrics.get("reward_std", 0),
+                "train/total_response_length": train_metrics.get("total_response_length", 0),
+                "train/total_kl": train_metrics.get("total_kl", 0),
+                "train/pro_loss": train_metrics.get("pro_loss", 0),
+                "train/con_loss": train_metrics.get("con_loss", 0),
+                "train/pro_response_length": train_metrics.get("pro_response_length", 0),
+                "train/con_response_length": train_metrics.get("con_response_length", 0),
+                "train/pro_kl": train_metrics.get("pro_kl", 0),
+                "train/con_kl": train_metrics.get("con_kl", 0),
+                "train/step_loss": total_loss.item(),
+                "train/round_num": round_num,
                 "step": round_num
             }
             
