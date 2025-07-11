@@ -66,12 +66,13 @@ class RewardEvaluator(ABC):
         pass
 
 
-def get_evaluator(name: str) -> RewardEvaluator:
+def get_evaluator(name: str, contrastive: bool = False) -> RewardEvaluator:
     """
     Get the appropriate reward evaluator for a given task.
     
     Args:
         name: Name of the task/dataset to get evaluator for
+        contrastive: Whether to use contrastive mode for debate evaluation
         
     Returns:
         RewardEvaluator instance for the specified task
@@ -80,7 +81,7 @@ def get_evaluator(name: str) -> RewardEvaluator:
         NotImplementedError: If evaluator for given task is not implemented
     """
     if name.lower() == "debate":
-        return DebateEvaluator()
+        return DebateEvaluator(contrastive=contrastive)
     elif name.lower() == "ld":
         return LDEvaluator()
     elif name.lower() == "chopped":
@@ -517,17 +518,16 @@ class DebateEvaluator(RewardEvaluator):
         self,
         input_prompt: str,
         all_models: Dict[str, Any],
-        pro_model_completions: List[str],
-        con_model_completions: List[str],
+        first_model_completions: List[str],
+        second_model_completions: List[str],
         device: str
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> Tuple[torch.Tensor, Dict[str, float], torch.Tensor]:
         """Semi-batched round-robin tournament scoring - batch inner loop only."""
-        num_completions = len(pro_model_completions)
+        num_completions = len(first_model_completions)
         rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
         
         # Track wins/losses for each completion
-        wins = torch.zeros(num_completions, device=device)
-        losses = torch.zeros(num_completions, device=device)
+        wins = torch.zeros((num_completions, num_completions), device=device)
         
         topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
         
@@ -538,8 +538,8 @@ class DebateEvaluator(RewardEvaluator):
             comparison_indices = []
             
             for j in range(num_completions):
-                response1 = self._extract_xml_answer(pro_model_completions[i])
-                response2 = self._extract_xml_answer(con_model_completions[j])
+                response1 = self._extract_xml_answer(first_model_completions[i])
+                response2 = self._extract_xml_answer(second_model_completions[j])
                 
                 judge_prompt = self.judge_prompt.format(
                     topic=topic,
@@ -579,22 +579,20 @@ class DebateEvaluator(RewardEvaluator):
                 judge_response = judge_response.strip().upper()
                 
                 if "ARGUMENT_1_WINS" in judge_response:
-                    wins[i] += 1
-                    losses[j] += 1
-                elif "ARGUMENT_2_WINS" in judge_response:
-                    wins[j] += 1
-                    losses[i] += 1
+                    wins[i, j] = 1
         
         # Calculate normalized scores (-1.5 to 1.5 range)
-        total_matches = num_completions - 1  # number of matches per completion
-        win_rate = wins / total_matches
-        loss_rate = losses / total_matches
-        debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
+        total_matches = num_completions  # number of matches per completion
+        wins_first = wins.sum(dim=1)  # Wins for PRO model
+        wins_second = wins.sum(dim=0)  # Wins for CON model
+        first_win_rate = wins_first / total_matches
+        second_win_rate = wins_second / total_matches
+        first_debate_scores = first_win_rate * 1.5  # Scale to desired range
+        second_debate_scores = second_win_rate * 1.5  # Scale to desired range
 
         # Clean role prefixes that chat template might have added
         cleaned_completions = []
-        all_completions = pro_model_completions + con_model_completions
-        for completion in all_completions:
+        for completion in first_model_completions:
             # Remove common role prefixes
             completion = completion.strip()
             if completion.startswith(('user\n', 'system\n', 'assistant\n')):
@@ -624,20 +622,20 @@ class DebateEvaluator(RewardEvaluator):
 
         
         # Combine all rewards
-        rewards_per_func[:, 0] = debate_scores
+        rewards_per_func[:, 0] = first_debate_scores
         rewards_per_func[:, 1] = strict_format
         rewards_per_func[:, 2] = soft_format
         rewards_per_func[:, 3] = xml_count
         
         metrics = {
-            "rewards/debate_score": debate_scores.mean().item(),
+            "rewards/debate_score": first_debate_scores.mean().item(),
             "rewards/strict_format": strict_format.mean().item(),
             "rewards/soft_format": soft_format.mean().item(),
             "rewards/xml_count": xml_count.mean().item(),
             "reward": rewards_per_func.sum(dim=1).mean().item()
         }
         
-        return rewards_per_func, metrics
+        return rewards_per_func, metrics, second_debate_scores
 
 
     def _compute_test_rewards(

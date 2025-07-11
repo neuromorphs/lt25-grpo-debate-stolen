@@ -403,12 +403,13 @@ def score_contrastive_completions(
         'prompt': {
             'text': question,
         },
-        'generations': []
+        'pro_generations': [],
+        'con_generations': []
     }
 
     # Format inputs as expected by evaluator
     # Get rewards and metrics from evaluator
-    rewards_per_func, metrics = eval_class.compute_rewards(
+    pro_first_rewards_per_func, pro_first_metrics, con_second_debate_score = eval_class.compute_rewards(
         input_prompt=question,
         all_models=all_models, 
         train_model_completions=pro_completions_text,
@@ -418,38 +419,45 @@ def score_contrastive_completions(
         use_batched_eval=args.use_batch_judge,
         use_semi_batched_eval=args.use_semi_batch_judge
     )
-    rewards = rewards_per_func.sum(dim=1)
+    con_first_rewards_per_func, con_first_metrics, first_second_debate_score = eval_class.compute_rewards(
+        input_prompt=question,
+        all_models=all_models, 
+        train_model_completions=con_completions_text, # TODO: the argument name from the function is confusing
+        compare_model_completions=pro_completions_text, # TODO: the argument name from the function is confusing
+        device=device, 
+        is_test=False,
+        use_batched_eval=args.use_batch_judge,
+        use_semi_batched_eval=args.use_semi_batch_judge
+    )
+    pro_first_rewards_per_func[:, 0] += first_second_debate_score
+    con_first_rewards_per_func[:, 0] += con_second_debate_score
+    pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+    con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
 
-
+    # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
     # Store generation data
-    for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, rewards_per_func)):
+    for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, pro_first_rewards_per_func)):
         generation_data = {
             'response': completion,
             'scores': {
                 **eval_class.get_reward_breakdown(reward_scores), # TODO: why do we sum before to then breakdown?
-                'total_reward': rewards[i].item()
+                'total_reward': pro_rewards[i].item()
             }
         }
-        log_data['generations'].append(generation_data)
+        log_data['pro_generations'].append(generation_data)
+    for i, (completion, reward_scores) in enumerate(zip(con_completions_text, con_first_rewards_per_func)):
+        generation_data = {
+            'response': completion,
+            'scores': {
+                **eval_class.get_reward_breakdown(reward_scores),
+                'total_reward': con_rewards[i].item()
+            }
+        }
+        log_data['con_generations'].append(generation_data)
+    
+    metrics = {**pro_first_metrics, **con_first_metrics}
 
-    # Compute advantages
-    mean_grouped_rewards = rewards.view(-1, args.num_chains).mean(dim=1)
-    std_grouped_rewards = rewards.view(-1, args.num_chains).std(dim=1)
-
-    mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
-    std_grouped_rewards = std_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
-
-    advantages = (rewards - mean_grouped_rewards) / (std_grouped_rewards + 1e-4)
-    metrics["reward_std"] = std_grouped_rewards.mean().item()
-
-    # Store summary statistics
-    log_data['summary_stats'] = {
-        'mean_rewards_per_group': mean_grouped_rewards.tolist(),
-        'std_rewards_per_group': std_grouped_rewards.tolist(),
-        'advantages': advantages.tolist()
-    }
-
-    return rewards, advantages, rewards_per_func, metrics, log_data
+    return pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data
 
 
 def compute_loss(
@@ -726,22 +734,82 @@ def grpo_contrastive_loss(
     # Generate completions
     pro_prompt_completion_ids, pro_prompt_ids, pro_completion_ids, pro_attention_mask, pro_completions_text, _ = generate_completions(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text_candidate, device, args
-    )
+    ) # outputs 8 completions for PRO stance
     con_prompt_completion_ids, con_prompt_ids, con_completion_ids, con_attention_mask, con_completions_text, _ = generate_completions(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text_opponent, device, args
-    )
+    ) # outputs 8 completions for CON stance
     
     # Score completions (cross-comparison between PRO and CON)
-    pro_rewards, pro_advantages, pro_rewards_per_func, pro_metrics, pro_log_data = score_contrastive_completions(
+    pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data = score_contrastive_completions(
         pro_completions_text, con_completions_text, prompt_text_candidate, eval_class, device, args
     )
-    con_rewards, con_advantages, con_rewards_per_func, con_metrics, con_log_data = score_contrastive_completions(
-        con_completions_text, pro_completions_text, prompt_text_opponent, eval_class, device, args
+
+    def compute_contrastive_advantages(
+        pro_rewards: torch.Tensor, con_rewards: torch.Tensor,
+        log_data: dict, metrics:dict
+    ) -> tuple[torch.Tensor, dict]:
+        mean_grouped_pro_rewards = pro_rewards.view(-1, args.num_chains).mean(dim=1)
+        mean_grouped_con_rewards = con_rewards.view(-1, args.num_chains).mean(dim=1)
+        # print(f"Pro rewards shape: {pro_rewards.shape}, Con rewards shape: {con_rewards.shape}")
+        # print(f"Pro rewards view shape: {pro_rewards.view(-1, args.num_chains).shape}, Con rewards view shape: {con_rewards.view(-1, args.num_chains).shape}")
+        print(f"\nPro rewards: {pro_rewards}")
+        print(f"Con rewards: {con_rewards}")
+        # print(f"Mean grouped pro rewards shape: {mean_grouped_pro_rewards.shape}, Mean grouped con rewards shape: {mean_grouped_con_rewards.shape}")
+        # print(f"Mean grouped pro rewards: {mean_grouped_pro_rewards}")
+        # print(f"Mean grouped con rewards: {mean_grouped_con_rewards}")  
+        # Repeat mean rewards to match original shape
+        mean_grouped_pro_rewards = mean_grouped_pro_rewards.repeat_interleave(args.num_chains, dim=0)
+        mean_grouped_con_rewards = mean_grouped_con_rewards.repeat_interleave(args.num_chains, dim=0)   
+        # print(f"Mean grouped pro rewards after repeat shape: {mean_grouped_pro_rewards.shape}")
+        # print(f"Mean grouped pro rewards after repeat: {mean_grouped_pro_rewards}")
+        # print(f"Mean grouped con rewards after repeat shape: {mean_grouped_con_rewards.shape}")
+        # print(f"Mean grouped con rewards after repeat: {mean_grouped_con_rewards}")
+        std_grouped_pro_rewards = pro_rewards.view(-1, args.num_chains).std(dim=1)
+        std_grouped_con_rewards = con_rewards.view(-1, args.num_chains).std(dim=1)
+        # print(f"Std grouped pro rewards shape: {std_grouped_pro_rewards.shape}, Std grouped con rewards shape: {std_grouped_con_rewards.shape}")
+        # print(f"Std grouped pro rewards: {std_grouped_pro_rewards}")
+        # print(f"Std grouped con rewards: {std_grouped_con_rewards}")
+        # Repeat std rewards to match original shape
+        std_grouped_pro_rewards = std_grouped_pro_rewards.repeat_interleave(args.num_chains, dim=0)
+        std_grouped_con_rewards = std_grouped_con_rewards.repeat_interleave(args.num_chains, dim=0)
+        # print(f"Std grouped pro rewards after repeat shape: {std_grouped_pro_rewards.shape}")
+        # print(f"Std grouped pro rewards after repeat: {std_grouped_pro_rewards}")
+        # print(f"Std grouped con rewards after repeat shape: {std_grouped_con_rewards.shape}")
+        # print(f"Std grouped con rewards after repeat: {std_grouped_con_rewards}")
+        # Compute advantages
+        pro_advantages = (pro_rewards - mean_grouped_pro_rewards) / (std_grouped_pro_rewards + 1e-4)
+        con_advantages = (con_rewards - mean_grouped_con_rewards) / (std_grouped_con_rewards + 1e-4)
+        # print(f"Pro advantages shape: {pro_advantages.shape}")
+        # print(f"Con advantages shape: {con_advantages.shape}")
+        print(f"Pro advantages: {pro_advantages}")
+        print(f"Con advantages: {con_advantages}")
+
+        metrics["pro_reward_std"] = std_grouped_pro_rewards.mean().item()
+        metrics["con_reward_std"] = std_grouped_con_rewards.mean().item()
+        # print(f"Pro Reward std: {metrics['pro_reward_std']}")
+        # print(f"Con Reward std: {metrics['con_reward_std']}")
+        print(f"Metrics: {metrics}")
+
+        # Store summary statistics
+        log_data['pro_summary_stats'] = {
+            'mean_rewards_per_group': mean_grouped_pro_rewards.tolist(),
+            'std_rewards_per_group': std_grouped_pro_rewards.tolist(),
+            'advantages': pro_advantages.tolist()
+        }
+        log_data['con_summary_stats'] = {
+            'mean_rewards_per_group': mean_grouped_con_rewards.tolist(),
+            'std_rewards_per_group': std_grouped_con_rewards.tolist(),
+            'advantages': con_advantages.tolist()
+        }
+        return pro_advantages, con_advantages, log_data
+        
+    pro_advantages, con_advantages, log_data = compute_contrastive_advantages(
+        pro_rewards, con_rewards, log_data, metrics
     )
 
     # Write log data
     log_file = os.path.join(training_log_dir, f'{round_num}_contrastive_generations.txt')
-    utils.write_contrastive_generation_log(pro_log_data, con_log_data, log_file)
+    utils.write_contrastive_generation_log(log_data, log_file)
 
     # Compute contrastive loss
     pro_completion_mask = pro_attention_mask[:, pro_prompt_ids.size(1):]
@@ -756,7 +824,7 @@ def grpo_contrastive_loss(
     )
 
     # Combine metrics
-    combined_metrics = {**pro_metrics, **con_metrics, **loss_metrics}
+    combined_metrics = {**metrics, **loss_metrics}
 
     return loss, combined_metrics
 
@@ -899,16 +967,16 @@ if __name__ == "__main__":
         logger.info(f"Loading training model: {args.model_name}")
     model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)
     if args.enable_detailed_logging:
-        logger.info(f"Loading base model: {args.model_name}")
-    base_model, _ = llms.get_llm_tokenizer(args.model_name, device)
+        logger.info(f"Using same model for base model: {args.model_name}")
+    base_model = model
 
     # Get judge and compare models using the new interfaces
     if args.enable_detailed_logging:
-        logger.info(f"Loading judge model: {args.judge_model_name}")
-    judge_model = llms.get_judge_model(args.judge_model_name, device)
+        logger.info(f"Using same model for judge model: {args.model_name}")
+    judge_model = llms.get_judge_model(args.model_name, device)
     if args.enable_detailed_logging:
         logger.info(f"Loading compare model: {args.compare_model_name}")
-    compare_model = llms.get_compare_model(args.compare_model_name, device)
+    compare_model = judge_model
     
     # Simplified all_models dictionary
     all_models = {
@@ -932,7 +1000,7 @@ if __name__ == "__main__":
     ## Set which evaluation criteria to use 
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
-    eval_class = evaluator.get_evaluator(args.evaluator)
+    eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.use_contrastive)
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
