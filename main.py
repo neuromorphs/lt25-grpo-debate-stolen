@@ -989,7 +989,7 @@ if __name__ == "__main__":
     
     if args.enable_detailed_logging:
         logger.info(f"Loading compare model: {args.compare_model_name}")
-    compare_model = base_model
+    compare_model = llms.get_compare_model(args.compare_model_name, device)
     
     # Simplified all_models dictionary
     all_models = {
@@ -1097,7 +1097,7 @@ if __name__ == "__main__":
         if args.enable_detailed_logging and round_num % 100 == 0:  # Log every 100 rounds to avoid spam
             logger.info(f"Training round {round_num}/{args.num_train_iters-1}")
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations == 0 and round_num > 0:
+        if round_num % args.eval_iterations == 0:
             if args.enable_detailed_logging:
                 logger.info(f"Starting evaluation at round {round_num}")
             eval_metrics, eval_accuracy = eval_on_test_set(
