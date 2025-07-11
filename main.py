@@ -49,14 +49,39 @@ def eval_on_test_set(
         total_comparisons = 0
         total_wins = 0
         
-        for question in tqdm(test_loader, desc="Evaluating on test set"):
+        # Code debate specific metrics
+        if args.dataset_name == "code_debate":
+            correct_defense_wins = 0
+            correct_defense_comparisons = 0
+        
+        for item in tqdm(test_loader, desc="Evaluating on test set"):
             num_examples += 1
+            
+            # Handle different dataset formats
+            if args.dataset_name == "code_debate":
+                question, choices, correct_idx = item
+            else:
+                question = item
 
             # 1. Prepare prompting
-            prompt = [
-                {'role': 'system', 'content': test_loader.pre_prompt},
-                {'role': 'user', 'content': question}
-            ]
+            if args.use_contrastive:
+                if args.dataset_name == "code_debate":
+                    # For code_debate, test with the correct position
+                    prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
+                    ]
+                else:
+                    # For other datasets, use PRO position for evaluation
+                    prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': question + "Position: PRO"}
+                    ]
+            else:
+                prompt = [
+                    {'role': 'system', 'content': test_loader.pre_prompt},
+                    {'role': 'user', 'content': question}
+                ]
             prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
 
             # Log Initial prompt 
@@ -670,7 +695,7 @@ def grpo_loss(
     """
 
     prompt = [
-        {'role': 'system', 'content': test_loader.pre_prompt},
+        {'role': 'system', 'content': train_loader.pre_prompt},
         {'role': 'user', 'content': question}
     ]
     prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
@@ -708,7 +733,9 @@ def grpo_contrastive_loss(
         device: str,
         round_num: int,
         training_log_dir: str, 
-        args: argparse.Namespace
+        args: argparse.Namespace,
+        choices: list[str],
+        correct_idx: int
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Compute contrastive GRPO loss between PRO and CON stances.
@@ -727,15 +754,31 @@ def grpo_contrastive_loss(
         loss: The computed contrastive GRPO loss
         metrics: Dictionary containing training metrics
     """
-
-    pro_prompt = [
-        {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: PRO"}
-    ]
-    con_prompt = [
-        {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: CON"}
-    ]
+    if args.dataset_name == "code_debate":
+        # For code_debate, we use the choices and correct_idx to determine the PRO and CON prompts
+        pro_prompt = [
+            {'role': 'system', 'content': train_loader.pre_prompt},
+            {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
+        ]
+        
+        # Find all incorrect choices (all indices except the correct one)
+        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
+        # Randomly sample one incorrect index
+        sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
+        
+        con_prompt = [
+            {'role': 'system', 'content': train_loader.pre_prompt},
+            {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
+        ]
+    else:    
+        pro_prompt = [
+            {'role': 'system', 'content': train_loader.pre_prompt},
+            {'role': 'user', 'content': question + "Position: PRO"}
+        ]
+        con_prompt = [
+            {'role': 'system', 'content': train_loader.pre_prompt},
+            {'role': 'user', 'content': question + "Position: CON"}
+        ]
 
     prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(pro_prompt, tokenize=False)
     prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(con_prompt, tokenize=False)
@@ -836,6 +879,19 @@ def grpo_contrastive_loss(
 
     # Combine metrics
     combined_metrics = {**metrics, **loss_metrics}
+    
+    # Log win rate for defending correct_idx in code_debate
+    if args.dataset_name == "code_debate":
+        # Track wins when defending the correct answer (PRO stance)
+        pro_wins = (pro_rewards > con_rewards).sum().item()
+        total_comparisons = len(pro_rewards)
+        correct_defense_win_rate = pro_wins / total_comparisons if total_comparisons > 0 else 0
+        
+        combined_metrics["code_debate/correct_defense_win_rate"] = correct_defense_win_rate
+        combined_metrics["code_debate/correct_defense_wins"] = pro_wins
+        combined_metrics["code_debate/total_comparisons"] = total_comparisons
+        
+        print(f"Code Debate - Correct Defense Win Rate: {correct_defense_win_rate:.2%} ({pro_wins}/{total_comparisons})")
 
     return loss, combined_metrics
 
@@ -847,7 +903,7 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
-    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Dataset to use for training")
+    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate_code","debate", "ld", "chopped"], help="Dataset to use for training")
     parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Evaluator to use for scoring")
 
     # Output and logging
@@ -1162,7 +1218,11 @@ if __name__ == "__main__":
                 logger.info(f"Reference model updated at round {round_num} with alpha={args.ref_model_mixup_alpha}")
 
         # Get next question
-        question = next(train_loader)
+        
+        if args.dataset_name == "debate_code":
+            question, choices, correct_idx = next(train_loader)
+        else:
+            question = next(train_loader)
 
         # Clear cache before GRPO
         torch.cuda.empty_cache()
@@ -1174,7 +1234,7 @@ if __name__ == "__main__":
         # Do GRPO - generate chains, score, compute advantage, compute loss 
         if args.use_contrastive:
             total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, eval_class, 
-                                                            device, round_num, train_log_dir, args)
+                                                            device, round_num, train_log_dir, args, choices, correct_idx)
         else:
             total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, 
                                                 device, round_num, train_log_dir, args)

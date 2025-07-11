@@ -400,6 +400,163 @@ def build_ld_dataloaders() -> Tuple[LDDataLoader, LDDataLoader]:
     return trainloader, testloader
 
 
+class CodeComprehensionDataLoader(DataLoader):
+    """
+    A loader class that provides iteration over string manipulation tasks from the CodeComprehension dataset.
+    
+    This class implements both sequential and random access to code comprehension problems through
+    standard Python iterator protocols. It focuses specifically on string manipulation tasks,
+    filtering the dataset to include only problems that involve string operations.
+    """
+    
+    def __init__(self, random: bool = False, max_samples: int = None) -> None:
+        super().__init__(random)
+        self.max_samples = max_samples
+        self.string_examples = []
+        self._load_string_manipulation_examples()
+        self.pre_prompt = """You will be given a Python code snippet that performs string manipulation operations.
+            You should trace through the code execution step by step, then determine the final result.
+            It is very important that you put your reasoning process inside <reasoning> tags and your final answer inside <answer> tags, like this:
+
+            <reasoning>
+            Your step-by-step reasoning process here, tracing through each line of code:
+            1. Initial variable values
+            2. Each operation and its result
+            3. Final variable state
+            </reasoning>
+            <answer>
+            The final result/value that gets printed or assigned to the result variable
+            </answer>
+
+            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! 
+            Start each response by immediately starting with <reasoning>. 
+            """
+        self.system_prompt = SYSTEM_PROMPT
+        
+    def _load_string_manipulation_examples(self) -> None:
+        """Load and filter examples that involve string manipulation."""
+        from datasets import load_dataset
+        
+        dataset = load_dataset('imbue/code-comprehension')
+        string_functions = [
+            'str(', '.islower()', '.isdigit()', '.upper()', '.lower()', '.strip()', 
+            '.replace(', '.split(', '.join(', 'len(', '.swapcase()', '.isalpha()', 
+            '.startswith(', '.endswith(', '.find(', '.count(', '.capitalize()', 
+            '.title(', '.isnumeric(', '.isalnum(', '.lstrip(', '.rstrip()'
+        ]
+        
+        max_check = self.max_samples * 2 if self.max_samples else len(dataset['train'])
+        
+        for i in range(min(max_check, len(dataset['train']))):
+            example = dataset['train'][i]
+            question = example['question']
+            
+            # Check if this involves string manipulation
+            if any(func in question for func in string_functions):
+                self.string_examples.append(example)
+                if self.max_samples and len(self.string_examples) >= self.max_samples:
+                    break
+                    
+    def __len__(self) -> int:
+        return len(self.string_examples)
+        
+    def __iter__(self) -> 'CodeComprehensionDataLoader':
+        return self
+        
+    def __next__(self) -> tuple[str, list[str], int]:
+        if self.current_index >= len(self.string_examples):
+            raise StopIteration
+        
+        if self.random:
+            idx = random.randint(0, len(self.string_examples) - 1)
+        else:
+            idx = self.current_index
+            self.current_index += 1
+            
+        example = self.string_examples[idx]
+        
+        # Format the question - the dataset already includes the question format
+        formatted_question = example['question']
+        choices = example['choices']
+        correct_answer = example['correct_answer']
+        
+        # Find the index of the correct answer in choices
+        try:
+            correct_idx = choices.index(correct_answer)
+        except ValueError:
+            # If exact match not found, set to 0 as fallback
+            correct_idx = 0
+        
+        return formatted_question, choices, correct_idx
+
+    def reset(self):
+        self.current_index = 0
+        
+    def get_choices_and_answer(self, idx: int = None) -> tuple[list[str], str]:
+        """Get the choices and correct answer for a specific example."""
+        if idx is None:
+            idx = self.current_index - 1 if self.current_index > 0 else 0
+        
+        if idx >= len(self.string_examples):
+            raise IndexError("Index out of range")
+            
+        example = self.string_examples[idx]
+        return example['choices'], example['correct_answer']
+
+
+def build_codecomprehension_dataloaders(max_train_samples: int = 1000, max_test_samples: int = 200) -> Tuple[CodeComprehensionDataLoader, CodeComprehensionDataLoader]:
+    """
+    Build train and test data loaders for CodeComprehension string manipulation tasks.
+    
+    Args:
+        max_train_samples: Maximum number of training samples to load
+        max_test_samples: Maximum number of test samples to load
+        
+    Returns:
+        Tuple of (train_loader, test_loader)
+    """
+    from datasets import load_dataset
+    
+    dataset = load_dataset('imbue/code-comprehension')
+    string_functions = [
+        'str(', '.islower()', '.isdigit()', '.upper()', '.lower()', '.strip()', 
+        '.replace(', '.split(', '.join(', 'len(', '.swapcase()', '.isalpha()', 
+        '.startswith(', '.endswith(', '.find(', '.count(', '.capitalize()', 
+        '.title(', '.isnumeric(', '.isalnum(', '.lstrip(', '.rstrip()'
+    ]
+    
+    # Filter for string manipulation examples
+    string_examples = []
+    for i in range(len(dataset['train'])):
+        example = dataset['train'][i]
+        question = example['question']
+        
+        if any(func in question for func in string_functions):
+            string_examples.append(example)
+            
+    # Split into train/test (80/20 split)
+    total_examples = len(string_examples)
+    test_size = min(max_test_samples, int(total_examples * 0.2))
+    train_size = min(max_train_samples, total_examples - test_size)
+    
+    # Generate random indices for test set
+    test_indices = random.sample(range(total_examples), test_size)
+    test_indices_set = set(test_indices)
+    
+    # Split examples
+    train_examples = [example for i, example in enumerate(string_examples) if i not in test_indices_set][:train_size]
+    test_examples = [string_examples[i] for i in test_indices]
+    
+    # Create custom loaders with pre-filtered data
+    trainloader = CodeComprehensionDataLoader(random=True)
+    trainloader.string_examples = train_examples
+    
+    testloader = CodeComprehensionDataLoader(random=False)
+    testloader.string_examples = test_examples
+    
+    return trainloader, testloader
+
+
 class ChoppedDataLoader(DataLoader):
     """
     A loader class that provides iteration over mystery baskets for Chopped-style recipe generation.
@@ -534,12 +691,15 @@ def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
     return trainloader, testloader
 
 
-def get_dataloaders(dataset_name: str, contrastive: bool = False) -> Tuple[DataLoader, DataLoader]:
+def get_dataloaders(dataset_name: str, contrastive: bool = False, max_train_samples: int = None, max_test_samples: int = None) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
     Args:
-        dataset_name (str): Name of the dataset to load ('gsm8k', 'debate', 'ld', or 'chopped' currently supported)
+        dataset_name (str): Name of the dataset to load ('debate', 'ld', 'chopped', or 'codecomprehension' currently supported)
+        contrastive (bool): Whether to use contrastive version (only for debate dataset)
+        max_train_samples (int): Maximum number of training samples (only for codecomprehension dataset)
+        max_test_samples (int): Maximum number of test samples (only for codecomprehension dataset)
         
     Returns:
         Tuple[DataLoader, DataLoader]: Train and test data loaders
@@ -553,9 +713,44 @@ def get_dataloaders(dataset_name: str, contrastive: bool = False) -> Tuple[DataL
         return build_ld_dataloaders()
     elif dataset_name.lower() == 'chopped':
         return build_chopped_dataloaders()
+    elif dataset_name.lower() == 'codecomprehension':
+        # Use default values if not specified
+        train_samples = max_train_samples if max_train_samples is not None else 1000
+        test_samples = max_test_samples if max_test_samples is not None else 200
+        return build_codecomprehension_dataloaders(train_samples, test_samples)
     else:
-        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', and 'chopped' are available.")
+        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', 'chopped', and 'codecomprehension' are available.")
 
 
 if __name__ == "__main__": 
-    trainloader, testloader = get_dataloaders('debate')
+    # Example usage for CodeComprehension dataset
+    print("=== CodeComprehension Dataset Example ===")
+    trainloader, testloader = get_dataloaders('codecomprehension', max_train_samples=50, max_test_samples=10)
+    
+    print(f"Training samples: {len(trainloader)}")
+    print(f"Test samples: {len(testloader)}")
+    
+    # Show a few training examples
+    print("\n--- Training Examples ---")
+    for i, (question, choices, correct_idx) in enumerate(trainloader):
+        if i >= 2:
+            break
+        print(f"\nExample {i+1}:")
+        print(f"Question: {question}")
+        print(f"Choices: {choices}")
+        print(f"Correct Answer Index: {correct_idx}")
+        print(f"Correct Answer: {choices[correct_idx]}")
+        print("-" * 50)
+    
+    # Reset and show test example
+    testloader.reset()
+    print("\n--- Test Example ---")
+    test_question, test_choices, test_correct_idx = next(testloader)
+    print(f"Question: {test_question}")
+    print(f"Choices: {test_choices}")
+    print(f"Correct Answer Index: {test_correct_idx}")
+    print(f"Correct Answer: {test_choices[test_correct_idx]}")
+    
+    # Show the pre_prompt
+    print("\n--- Pre-prompt Template ---")
+    print(trainloader.pre_prompt)
