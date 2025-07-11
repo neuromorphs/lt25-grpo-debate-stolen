@@ -10,6 +10,7 @@ from tqdm import tqdm
 from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 from model_interface import ModelInterface
+import random
 
 import llms
 import utils
@@ -29,7 +30,8 @@ def eval_on_test_set(
     eval_class: evaluator.RewardEvaluator,
     device: str,
     args: argparse.Namespace,
-    round_num: int
+    round_num: int,
+    contrastive: bool = False
 ) -> tuple[dict[str, float], float]:
     """
     Evaluate model performance on test set by comparing each model completion
@@ -51,7 +53,9 @@ def eval_on_test_set(
         
         for question in tqdm(test_loader, desc="Evaluating on test set"):
             num_examples += 1
-
+            if contrastive:
+                position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
+                question = question + f'Position: {position}'  # Append stance to question
             # 1. Prepare prompting
             prompt = [
                 {'role': 'system', 'content': test_loader.pre_prompt},
@@ -1106,7 +1110,8 @@ if __name__ == "__main__":
                 eval_class=eval_class,
                 device=device,
                 args=args,
-                round_num=round_num
+                round_num=round_num,
+                contrastive=args.use_contrastive,
             )
             
             if args.enable_detailed_logging:
