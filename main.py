@@ -615,7 +615,7 @@ def compute_contrastive_loss(
     # PRO stance metrics
     pro_response_length = pro_completion_mask.sum(1).float().mean().item()
     print(f"PRO response length: {pro_response_length}")
-    print(f"PRO PER TOKEN KL: {pro_per_token_kl}")
+    # print(f"PRO PER TOKEN KL: {pro_per_token_kl}")
     metrics["pro_response_length"] = pro_response_length
     pro_mean_kl = ((pro_per_token_kl * pro_completion_mask).sum(dim=1) / pro_completion_mask.sum(dim=1)).mean()
     print(f"PRO mean KL: {pro_mean_kl}")
@@ -624,7 +624,7 @@ def compute_contrastive_loss(
     # CON stance metrics  
     con_response_length = con_completion_mask.sum(1).float().mean().item()
     print(f"CON response length: {con_response_length}")
-    print(f"CON PER TOKEN KL: {con_per_token_kl}")
+    # print(f"CON PER TOKEN KL: {con_per_token_kl}")
     metrics["con_response_length"] = con_response_length
     con_mean_kl = ((con_per_token_kl * con_completion_mask).sum(dim=1) / con_completion_mask.sum(dim=1)).mean()
     print(f"CON mean KL: {con_mean_kl}")
@@ -977,17 +977,19 @@ if __name__ == "__main__":
     if args.enable_detailed_logging:
         logger.info(f"Loading training model: {args.model_name}")
     model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)
-    if args.enable_detailed_logging:
-        logger.info(f"Using same model for base model: {args.model_name}")
-    base_model = model
 
     # Get judge and compare models using the new interfaces
     if args.enable_detailed_logging:
         logger.info(f"Using same model for judge model: {args.model_name}")
     judge_model = llms.get_judge_model(args.model_name, device)
+
+    if args.enable_detailed_logging:
+        logger.info(f"Using same model for base model: {args.model_name}")
+    base_model, _ = llms.get_llm_tokenizer(args.model_name, device)
+    
     if args.enable_detailed_logging:
         logger.info(f"Loading compare model: {args.compare_model_name}")
-    compare_model = judge_model
+    compare_model = base_model
     
     # Simplified all_models dictionary
     all_models = {
