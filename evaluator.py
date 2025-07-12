@@ -182,6 +182,12 @@ class DebateEvaluator(RewardEvaluator):
             if "<answer>" in text: count += 0.125
             if "</answer>" in text: count += 0.125
             
+            # Penalize if answer is less than 250 characters
+            if "<answer>" in text and "</answer>" in text:
+                answer = text.split("<answer>")[-1].split("</answer>")[0].strip()
+                if len(answer) < 250:
+                    count -= 0.25
+            
             # Only penalize actual content after final tag
             if "</answer>" in text:
                 count -= len(text.split("</answer>")[-1].strip())*0.001
@@ -524,7 +530,8 @@ class DebateEvaluator(RewardEvaluator):
         all_models: Dict[str, Any],
         first_model_completions: List[str],
         second_model_completions: List[str],
-        device: str
+        device: str,
+        pro_first: bool,
     ) -> Tuple[torch.Tensor, Dict[str, float], torch.Tensor]:
         """Semi-batched round-robin tournament scoring - batch inner loop only."""
         num_completions = len(first_model_completions)
@@ -544,6 +551,13 @@ class DebateEvaluator(RewardEvaluator):
             for j in range(num_completions):
                 response1 = self._extract_xml_answer(first_model_completions[i])
                 response2 = self._extract_xml_answer(second_model_completions[j])
+                if self.contrastive:
+                    if pro_first:
+                        response1 = 'PRO: ' + response1
+                        response2 = 'CON: ' + response2
+                    else:
+                        response1 = 'CON: ' + response1
+                        response2 = 'PRO: ' + response2
                 
                 judge_prompt = self.judge_prompt.format(
                     topic=topic,
@@ -584,7 +598,7 @@ class DebateEvaluator(RewardEvaluator):
                 
                 if "ARGUMENT_1_WINS" in judge_response:
                     wins[i, j] = 1
-        
+        # print(judge_prompt)
         # Calculate normalized scores (-1.5 to 1.5 range)
         total_matches = num_completions  # number of matches per completion
         wins_first = wins.sum(dim=1)  # Wins for PRO model
@@ -648,10 +662,13 @@ class DebateEvaluator(RewardEvaluator):
         all_models: Dict[str, Any],
         train_model_completions: List[str],
         compare_model_completions: List[str],
-        device: str
+        device: str,
+        train_first: bool | None = None,
+        train_pro: bool | None = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Head-to-head debates against base model for testing."""
         num_debates = len(train_model_completions)
+        # trained_spoke_first = torch.zeros(num_debates, device=device) # TODO: more granualar random choice
         rewards_per_func = torch.zeros(num_debates, self.num_reward_functions, device=device)
         wins = 0
         
@@ -676,13 +693,37 @@ class DebateEvaluator(RewardEvaluator):
             trained_response = self._extract_xml_answer(train_model_completions[i])
             
             # Get compare model's response
-            compare_response = self._extract_xml_answer(compare_model_completions[i])     
+            compare_response = self._extract_xml_answer(compare_model_completions[i]) 
+            
+            if train_first is None:
+                raise ValueError("train_first must be specified")
+
+            if self.contrastive:
+                # If contrastive, prepend PRO/CON based on position
+                # check that train_first is not None
+                if train_first: 
+                    arg1 = 'PRO: ' if train_pro else 'CON: '
+                    arg1 += trained_response
+                    arg2 = 'CON: ' if train_pro else 'PRO: '
+                    arg2 += compare_response
+                else:
+                    arg1 = 'CON: ' if train_pro else 'PRO: '
+                    arg1 += compare_response
+                    arg2 = 'PRO: ' if train_pro else 'CON: '
+                    arg2 += trained_response
+            else:
+                if train_first is None:
+                    arg1 = trained_response
+                    arg2 = compare_response
+                else:
+                    arg1 = compare_response
+                    arg2 = trained_response
 
             # Format judge prompt
             judge_prompt = self.judge_prompt.format(
                 topic=topic,
-                arg1_response=trained_response,
-                arg2_response=compare_response
+                arg1_response=arg1,
+                arg2_response=arg2
             )
             
             # Get judge's decision using the interface
@@ -693,15 +734,22 @@ class DebateEvaluator(RewardEvaluator):
                 temperature=0.1
             ).strip().upper()
             
-            if "ARGUMENT_1_WINS" in judge_response:
-                score = 1.0
-                rewards_per_func[i, 0] = score
-                wins += 1
+            if train_first:
+                if "ARGUMENT_1_WINS" in judge_response:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
+            else:
+                if "ARGUMENT_2_WINS" in judge_response:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
 
             # Add format rewards
             rewards_per_func[i, 1] = strict_format[i]
             rewards_per_func[i, 2] = soft_format[i]
             rewards_per_func[i, 3] = xml_count[i]
+        print(judge_prompt)
 
         win_rate = wins / num_debates
         metrics = {
@@ -726,11 +774,15 @@ class DebateEvaluator(RewardEvaluator):
         is_test: bool = False,
         use_batched_eval: bool = False,
         use_semi_batched_eval: bool = False,
+        train_first: Optional[bool] = None,
+        train_pro: Optional[bool] = None,
+        pro_first: Optional[bool] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:
             # print("Computing test rewards using head-to-head debates")
-            return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
+            return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, 
+                                              device, train_first=train_first, train_pro=train_pro)
         else:
             # print("Computing training rewards using round-robin tournament scoring")
             if use_batched_eval:
@@ -739,7 +791,10 @@ class DebateEvaluator(RewardEvaluator):
             elif use_semi_batched_eval:
                 # print("Using semi-batched evaluation for training rewards")
                 if self.contrastive: 
-                    return self._compute_train_contrastive_rewards_semi_batched(input_prompt, all_models, train_model_completions, compare_model_completions, device)
+                    return self._compute_train_contrastive_rewards_semi_batched(input_prompt, all_models, 
+                                                                                train_model_completions, 
+                                                                                compare_model_completions, 
+                                                                                device, pro_first=pro_first)
                 else:
                     return self._compute_train_rewards_semi_batched(input_prompt, all_models, train_model_completions, device)
             else:
@@ -817,6 +872,12 @@ class LDEvaluator(RewardEvaluator):
             if "</reasoning>" in text: count += 0.125
             if "<answer>" in text: count += 0.125
             if "</answer>" in text: count += 0.125
+            
+            # Penalize if answer is less than 250 characters
+            if "<answer>" in text and "</answer>" in text:
+                answer = text.split("<answer>")[-1].split("</answer>")[0].strip()
+                if len(answer) < 250:
+                    count -= 0.25
             
             # Only penalize actual content after final tag
             if "</answer>" in text:
@@ -1067,6 +1128,12 @@ class ChoppedEvaluator(RewardEvaluator):
             if "</reasoning>" in text: count += 0.125
             if "<answer>" in text: count += 0.125
             if "</answer>" in text: count += 0.125
+            
+            # Penalize if answer is less than 250 characters
+            if "<answer>" in text and "</answer>" in text:
+                answer = text.split("<answer>")[-1].split("</answer>")[0].strip()
+                if len(answer) < 250:
+                    count -= 0.25
             
             # Only penalize actual content after final tag
             if "</answer>" in text:
