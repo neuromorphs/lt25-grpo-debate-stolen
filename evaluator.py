@@ -1447,25 +1447,27 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
         n = len(trained_completions)
         rewards = torch.zeros(n, self.num_reward_functions, device=device)
         wins = 0
-        
+
         if gold_answer is None:
+            print("ANSWER NOT PROVIDED")
             # Fall back to judge-based evaluation if no gold answer
             return self._compute_test_rewards_judge_based(
                 prompt, all_models, trained_completions, baseline_completions, device
             )
-        
+
         # Extract answers and check correctness
         for i in range(n):
             # Extract answer from trained model's completion
             trained_answer = self._extract_xml_answer(trained_completions[i]).strip()
-            
+
             # Check if the trained model got it correct
+            #print("USING ACCURACY BASED CHECKING MECHANISM")
             trained_correct = self._check_answer_correctness(trained_answer, gold_answer)
-            
+
             # Extract answer from baseline model's completion  
             baseline_answer = self._extract_xml_answer(baseline_completions[i]).strip()
             baseline_correct = self._check_answer_correctness(baseline_answer, gold_answer)
-            
+
             # Assign win based on correctness
             if trained_correct and not baseline_correct:
                 wins += 1
@@ -1474,12 +1476,12 @@ YOU MUST CHOOSE A WINNER – ties are not allowed."""
                 # Both correct - could use judge as tiebreaker or give partial credit
                 rewards[i, 0] = 0.5  # Or use judge to break tie
             # If trained is wrong, it gets 0 (default)
-            
+
             # XML-format rewards remain the same
             rewards[i, 1] = self._strict_format_reward([trained_completions[i]])[0]
             rewards[i, 2] = self._soft_format_reward([trained_completions[i]])[0]
             rewards[i, 3] = self._xml_count_reward([trained_completions[i]])[0]
-        
+
         win_rate = wins / n
         metrics = {
             "num_wins": wins,

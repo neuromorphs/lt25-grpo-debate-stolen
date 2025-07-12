@@ -668,7 +668,7 @@ def compute_contrastive_loss(
 def grpo_loss(
         train_loader,
         all_models: dict,
-        question: str,
+        question: str,  # This might now be a tuple for GSM8K
         eval_class: evaluator.RewardEvaluator,
         device: str,
         round_num: int,
@@ -695,6 +695,16 @@ def grpo_loss(
         metrics: Dictionary containing training metrics
         reward: The total reward for this batch
     """
+
+    # Handle different dataset formats
+    if isinstance(question, tuple):
+        # GSM8K returns (prompt, gold_answer)
+        question, gold_answer = question
+    else:
+        # Other datasets return just the question
+        question = question
+        gold_answer = None
+
 
     prompt = [
         {'role': 'system', 'content': test_loader.pre_prompt},
@@ -1206,7 +1216,7 @@ if __name__ == "__main__":
         else:
             total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, 
                                                 device, round_num, train_log_dir, args)
-        
+
         # Gradient accumulation
         total_loss = total_loss
         total_loss.backward()

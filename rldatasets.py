@@ -638,8 +638,8 @@ class GSM8KDataLoader(DataLoader):
 
 
 def build_gsm8k_dataloaders(
-    train_size = 100,
-    test_size  = 10,
+    train_size = 500,
+    test_size  = 50,
     seed = 42,
 ) -> tuple[GSM8KDataLoader, GSM8KDataLoader]:
     """
