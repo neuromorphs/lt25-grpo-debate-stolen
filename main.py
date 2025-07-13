@@ -10,6 +10,7 @@ from tqdm import tqdm
 from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 from model_interface import ModelInterface
+import random
 
 import llms
 import utils
@@ -29,7 +30,8 @@ def eval_on_test_set(
     eval_class: evaluator.RewardEvaluator,
     device: str,
     args: argparse.Namespace,
-    round_num: int
+    round_num: int,
+    # contrastive: bool = False
 ) -> tuple[dict[str, float], float]:
     """
     Evaluate model performance on test set by comparing each model completion
@@ -39,7 +41,10 @@ def eval_on_test_set(
     logger = logging.getLogger(__name__) if hasattr(args, 'enable_detailed_logging') and args.enable_detailed_logging else None
     
     total_scores = defaultdict(float)
-    num_examples = 0
+    trained_spoke_first = 0  # Track which model spoke first
+    trained_defended_pro = 0  # Track if trained model is PRO in contrastive setup
+    win_rate_per_question = torch.zeros(len(test_loader), device=device)
+    num_question = 0
     total_wins = 0
 
     log_file = os.path.join(args.output_dir, f'eval_metrics_{round_num}.txt')
@@ -49,90 +54,85 @@ def eval_on_test_set(
         total_comparisons = 0
         total_wins = 0
         
-        # Code debate specific metrics
-        if args.dataset_name == "code_debate":
-            correct_defense_wins = 0
-            correct_defense_comparisons = 0
+        # # Code debate specific metrics
+        # if args.dataset_name == "code_debate":
+        #     correct_defense_wins = 0
+        #     correct_defense_comparisons = 0
         
         for item in tqdm(test_loader, desc="Evaluating on test set"):
-            num_examples += 1
+            num_question += 1
             
             # Handle different dataset formats
-            if args.dataset_name == "code_debate":
+            if args.dataset_name.lower() == "code_debate":
                 question, choices, correct_idx = item
+                possible_positions = {
+                    'PRO': choices[correct_idx],  # PRO stance is defending the correct answer
+                    'CON': random.choice([c for i, c in enumerate(choices) if i != correct_idx])  # CON stance is defending a random incorrect answer
+                }
+                gold_answer = choices[correct_idx]  # Gold answer is the correct choice
+            elif args.dataset_name.lower() == "gsm8k":
+                question, gold_answer = item  
+                if eval_class.contrastive:
+                    possible_positions = {
+                        'PRO': gold_answer,  # PRO stance is defending the gold answer
+                        'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
+                    }
+                else:
+                    possible_positions = {
+                        'PRO': None, 
+                        'CON': None 
+                    }
             else:
                 question = item
-
-            # 1. Prepare prompting
-            if args.use_contrastive:
-                if args.dataset_name == "code_debate":
-                    # For code_debate, randomly sample between defending correct answer or a random incorrect answer
-                    if torch.rand(1).item() < 0.5:
-                        # Defend correct answer
-                        chosen_idx = correct_idx
-                    else:
-                        # Defend a random incorrect answer
-                        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
-                        chosen_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
-                    
-                    prompt = [
+                possible_positions = {
+                    'PRO': 'PRO',  # Default PRO stance
+                    'CON': 'CON'  # Default CON stance
+                }
+            trained_first = random.choice([True, False])  # Randomly choose which models goes first
+            trained_spoke_first += 1 if trained_first else 0
+            if eval_class.contrastive:
+                position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
+                trained_defended_pro += 1 if trained_pro else 0
+                pro_question = question + (f' Position: {possible_positions["PRO"]}' if possible_positions!= None else '')
+                trained_prompt = [
                         {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question + f"Position: {choices[chosen_idx]}"}
-                    ]
-                else:
-                    # For other datasets, randomly sample between PRO and CON positions
-                    position = "PRO" if torch.rand(1).item() < 0.5 else "CON"
-                    prompt = [
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question + f"Position: {position}"}
-                    ]
-            else:
-                prompt = [
-                    {'role': 'system', 'content': test_loader.pre_prompt},
-                    {'role': 'user', 'content': question}
+                        {'role': 'user', 'content': pro_question},
                 ]
-            prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
+                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+                compare_prompt = con_question if trained_pro else pro_question
+            else:
+                    trained_prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': question}
+                    ]
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
-            f.write(f"Example #{num_examples}\n")
+            f.write(f"Question #{num_question}\n")
             f.write("="*80 + "\n\n")
+            f.write("Prompt judge:\n")
             
             f.write("Prompt:\n")
-            f.write(f"{prompt_text}\n\n")
+            if eval_class.contrastive:
+                f.write(f"PRO: {trained_prompt_text}\n")
+                f.write(f"CON: {compare_prompt_text}\n")
+            else:
+                f.write(f"{trained_prompt_text}\n")
 
             # Generate completions from trained model
-            _, _, _, _, completions_text, _ = generate_completions(
-                all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
+            _, _, _, _, trained_completions_text, _ = generate_completions(
+                all_models["training_model"], all_models["training_model_tokenizer"], trained_prompt_text, device, args
             )
-
-            # Modify user prompt based on dataset type and requirements
-            if args.use_contrastive:
-                if args.dataset_name == "code_debate":
-                    # For code_debate, if the correct answer was chosen for training, use the opposite (incorrect) for compare
-                    if chosen_idx == correct_idx:
-                        # Training model defended correct answer, compare model should defend incorrect
-                        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
-                        compare_chosen_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
-                    else:
-                        # Training model defended incorrect answer, compare model should defend correct
-                        compare_chosen_idx = correct_idx
-                    
-                    compare_user_prompt = question + f"Position: {choices[compare_chosen_idx]}"
-                else:
-                    # For pro/con datasets, take the opposite position
-                    compare_position = "CON" if position == "PRO" else "PRO"
-                    compare_user_prompt = question + f"Position: {compare_position}"
-            else:
-                # Use original question for non-contrastive mode
-                compare_user_prompt = question
+            # _, _, _, _, compare_completions_text, _ = generate_completions(
+            #     all_models["compare_model"], all_models["training_model_tokenizer"], compare_prompt_text, device, args
+            # )
 
             # Generate completions for compare model using batched interface
             if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
                 # Use efficient batched generation for HuggingFace models (e.g., Qwen)
                 compare_completions_text = all_models["compare_model"].generate_batch(
                     system_prompt=test_loader.pre_prompt,
-                    user_prompt=compare_user_prompt,
+                    user_prompt=compare_prompt,
                     num_completions=args.num_chains,
                     max_new_tokens=args.max_completion_length,
                     temperature=args.temperature
@@ -151,29 +151,45 @@ def eval_on_test_set(
 
             input_prompt = {
                 'question': question,
-                'pro_prompt': pro_prompt[1]['content'],
-                'con_prompt': con_prompt[1]['content'],
+                'pro_prompt': possible_positions['PRO'] if eval_class.contrastive else None,
+                'con_prompt': possible_positions['CON'] if eval_class.contrastive else None,
             }
-            # Score completions to get reward metrics
-            rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=input_prompt, 
-                all_models=all_models, 
-                train_model_completions=completions_text, 
-                compare_model_completions=compare_completions_text,
-                device=device,
-                is_test=True,
-                use_batched_eval=args.use_batch_judge,
-                use_semi_batched_eval=args.use_semi_batch_judge
-            )
+            if args.dataset_name.lower() == "gsm8k":
+                # When computing rewards, pass the gold answer
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=input_prompt, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    gold_answer=gold_answer,
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge
+                )
+            else:
+                # Score completions to get reward metrics
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=question, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge,
+                    train_first=trained_first,
+                    train_pro=trained_pro if eval_class.contrastive else None
+                )
 
             # Track total comparisons and wins
-            comparisons_this_question = len(completions_text)
+            comparisons_this_question = len(trained_completions_text)
             total_comparisons += comparisons_this_question
             total_wins += reward_metrics['num_wins']
 
             # For each completion pair, log the results
-            for i, (completion, compare_completion) in enumerate(zip(completions_text, compare_completions_text)):
-                f.write(f"\nCompletion #{i+1}:\n")
+            for i, (completion, compare_completion) in enumerate(zip(trained_completions_text, compare_completions_text)):
+                f.write(f"\nCompletion #{i+1}\n")
                 f.write("-"*40 + "\n\n")
 
                 # Log trained model's response
@@ -216,6 +232,7 @@ def eval_on_test_set(
                 f.write(f"\nOUTCOME: Trained model {'won' if trained_model_won else 'lost'} this comparison\n")
                 f.write("-"*40 + "\n")
 
+            win_rate_per_question[num_question - 1] = reward_metrics['win_rate']
             # Log summary metrics for this question
             f.write("\nSUMMARY METRICS:\n")
             f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
@@ -233,15 +250,18 @@ def eval_on_test_set(
         
         # Calculate final metrics
         win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
-        avg_scores = {k: v/num_examples for k,v in total_scores.items()}
+        avg_scores = {k: v/num_question for k,v in total_scores.items()}
 
         # Save metrics
         metrics = {
             'win_rate': win_rate,
             'total_wins': total_wins,
             'total_comparisons': total_comparisons,
-            'num_examples': num_examples,
-            'average_scores': avg_scores
+            'num_question': num_question,
+            'average_scores': avg_scores,
+            'trained_spoke_first': trained_spoke_first,
+            'trained_defended_pro': trained_defended_pro,
+            'win_rate_per_question': win_rate_per_question.tolist() if isinstance(win_rate_per_question, torch.Tensor) else win_rate_per_question,
         }
 
         # Write summary results to file and optionally print
@@ -478,7 +498,8 @@ def score_contrastive_completions(
         device=device, 
         is_test=False,
         use_batched_eval=args.use_batch_judge,
-        use_semi_batched_eval=args.use_semi_batch_judge
+        use_semi_batched_eval=args.use_semi_batch_judge,
+        pro_first=True,
     )
     con_first_rewards_per_func, con_first_metrics, first_second_debate_score = eval_class.compute_rewards(
         input_prompt=input_prompt,
@@ -488,9 +509,10 @@ def score_contrastive_completions(
         device=device, 
         is_test=False,
         use_batched_eval=args.use_batch_judge,
-        use_semi_batched_eval=args.use_semi_batch_judge
+        use_semi_batched_eval=args.use_semi_batch_judge,
+        pro_first=False,
     )
-    if args.dataset_name == "code_debate":
+    if args.dataset_name == "code_debate" and args.truth_optim:
         # lign/column average
         pro_first_rewards_per_func[:, 0] += first_second_debate_score
         pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models (positions)
@@ -510,7 +532,7 @@ def score_contrastive_completions(
     # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
     # Store generation data
     for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, pro_first_rewards_per_func)):
-        print(completion)
+        # print(completion)
         generation_data = {
             'response': completion,
             'scores': {
@@ -520,7 +542,7 @@ def score_contrastive_completions(
         }
         log_data['pro_generations'].append(generation_data)
     for i, (completion, reward_scores) in enumerate(zip(con_completions_text, con_first_rewards_per_func)):
-        print(completion)
+        # print(completion)
         generation_data = {
             'response': completion,
             'scores': {
@@ -711,7 +733,7 @@ def compute_contrastive_loss(
 def grpo_loss(
         train_loader,
         all_models: dict,
-        question: str,
+        question: str,  # This might now be a tuple for GSM8K
         eval_class: evaluator.RewardEvaluator,
         device: str,
         round_num: int,
@@ -738,6 +760,16 @@ def grpo_loss(
         metrics: Dictionary containing training metrics
         reward: The total reward for this batch
     """
+
+    # Handle different dataset formats
+    if isinstance(question, tuple):
+        # GSM8K returns (prompt, gold_answer)
+        question, gold_answer = question
+    else:
+        # Other datasets return just the question
+        question = question
+        gold_answer = None
+
 
     prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
@@ -954,8 +986,10 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
-    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate_code","debate", "ld", "chopped"], help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Evaluator to use for scoring")
+    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate_code","debate", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
+    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
+    # add objective_functionality
+    parser.add_argument("--eval_type", type=str, default="pp", choices=["pp, pc"], help="Objective functionality to use for scoring")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -994,7 +1028,8 @@ def parse_args():
     parser.add_argument("--num_train_iters", type=int, default=1000, help="Number of training iterations")
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
-    parser.add_argument("--use_contrastive", action="store_true", help="Use contrastive GRPO training (PRO vs CON)")
+    parser.add_argument("--use_contrastive", action="store_true", help="Use contrastive GRPO training (PRO vs CON)") 
+    parser.add_argument("--truth_optim", action="store_true", help="Use truth optimization for code_debate")
 
     args = parser.parse_args()
     return args
@@ -1003,6 +1038,10 @@ if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
+
+    # Check if that only valid combination of args is used
+    if args.dataset_name == "code_debate" and ((not args.use_contrastive) or not (args.eval_type == "pc")):
+        raise ValueError("For code_debate dataset, you must use --use_contrastive and --eval_type pc (position comparison)")
     
     # Setup logging
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1120,7 +1159,8 @@ if __name__ == "__main__":
     ## Set which evaluation criteria to use 
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
-    eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.use_contrastive)
+    train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.use_contrastive)
+    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=False if args.eval_type == "pp" else True)
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
@@ -1210,10 +1250,11 @@ if __name__ == "__main__":
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,
-                eval_class=eval_class,
+                eval_class=eval_eval_class,
                 device=device,
                 args=args,
-                round_num=round_num
+                round_num=round_num,
+                # contrastive=False if args.eval_type == "pp" else True,
             )
             
             if args.enable_detailed_logging:
@@ -1226,7 +1267,9 @@ if __name__ == "__main__":
                     "eval/win_rate": eval_accuracy,
                     "eval/total_wins": eval_metrics.get("total_wins", 0),
                     "eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
-                    "eval/num_examples": eval_metrics.get("num_examples", 0),
+                    "eval/num_question": eval_metrics.get("num_question", 0),
+                    "eval/trained_spoke_first": eval_metrics.get("trained_spoke_first", 0),
+                    "eval/trained_defended_pro": eval_metrics.get("trained_defended_pro", 0),
                     "step": round_num
                 }
                 
@@ -1284,12 +1327,12 @@ if __name__ == "__main__":
         print(question)
         # Do GRPO - generate chains, score, compute advantage, compute loss 
         if args.use_contrastive:
-            total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, eval_class, 
+            total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, train_eval_class, 
                                                             device, round_num, train_log_dir, args, choices, correct_idx)
         else:
-            total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, 
+            total_loss, train_metrics = grpo_loss(train_loader, all_models, question, train_eval_class, 
                                                 device, round_num, train_log_dir, args)
-        
+
         # Gradient accumulation
         total_loss = total_loss
         total_loss.backward()
