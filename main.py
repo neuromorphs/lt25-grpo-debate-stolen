@@ -58,30 +58,48 @@ def eval_on_test_set(
             num_question += 1
             trained_first = random.choice([True, False])  # Randomly choose which models goes first
             trained_spoke_first += 1 if trained_first else 0
-            if eval_class.contrastive:
-                pro_question = question + f'Position: PRO'  # Append stance to question
-                con_question = question + f'Position: CON'
-                # TODO: 
-                trained_pro = random.choice([True, False])  # Randomly choose which model is trained
-                trained_defended_pro += 1 if trained_pro else 0
-                trained_prompt = [
-                    {'role': 'system', 'content': test_loader.pre_prompt},
-                    {'role': 'user', 'content': pro_question if trained_pro else con_question}
-                ]
-                compare_prompt = [
-                    {'role': 'system', 'content': test_loader.pre_prompt},
-                    {'role': 'user', 'content': con_question if trained_pro else pro_question}
-                ]
-                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-                compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt, tokenize=False)
-            else:
+
+            if args.dataset_name.lower() == "gsm8k":
+                question, gold_answer = question  # GSM8K returns tuple
+                if contrastive:
+                    position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
+                    question = question + f'Position: {position}'  # Append stance to question
                 # 1. Prepare prompting
                 trained_prompt = [
                     {'role': 'system', 'content': test_loader.pre_prompt},
                     {'role': 'user', 'content': question}
                 ]
                 trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-                compare_prompt_text = trained_prompt_text
+                compare_prompt = question
+            else:
+                gold_answer = None
+
+                if eval_class.contrastive:
+                    pro_question = question + f'Position: PRO'  # Append stance to question
+                    con_question = question + f'Position: CON'
+                    # TODO: 
+                    trained_pro = random.choice([True, False])  # Randomly choose which model is trained
+                    trained_defended_pro += 1 if trained_pro else 0
+                    trained_prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': pro_question if trained_pro else con_question}
+                    ]
+#                     compare_prompt = [
+#                         {'role': 'system', 'content': test_loader.pre_prompt},
+#                         {'role': 'user', 'content': con_question if trained_pro else pro_question}
+#                     ]
+                    trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+#                     compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt, tokenize=False)
+                    compare_prompt = con_question if trained_pro else pro_question
+                else:
+                    # 1. Prepare prompting
+                    trained_prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': question}
+                    ]
+                    trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+#                    compare_prompt_text = trained_prompt_text
+                    compare_prompt = question
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
@@ -104,12 +122,6 @@ def eval_on_test_set(
             #     all_models["compare_model"], all_models["training_model_tokenizer"], compare_prompt_text, device, args
             # )
 
-            # Generate completions for compare model using batched interface
-            # TODO: simplify generate semi or batch comple
-            if eval_class.contrastive:
-                compare_prompt = con_question if trained_pro else pro_question
-            else:
-                compare_prompt = question
             if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
                 # Use efficient batched generation for HuggingFace models (e.g., Qwen)
                 compare_completions_text = all_models["compare_model"].generate_batch(
@@ -131,19 +143,33 @@ def eval_on_test_set(
                     )
                     compare_completions_text.append(completion)
 
-            # Score completions to get reward metrics
-            rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=question, 
-                all_models=all_models, 
-                train_model_completions=trained_completions_text, 
-                compare_model_completions=compare_completions_text,
-                device=device,
-                is_test=True,
-                use_batched_eval=args.use_batch_judge,
-                use_semi_batched_eval=args.use_semi_batch_judge,
-                train_first=trained_first,
-                train_pro=trained_pro if eval_class.contrastive else None
-            )
+            if args.dataset_name.lower() == "gsm8k":
+                # When computing rewards, pass the gold answer
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=question, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    gold_answer=gold_answer,  # Pass gold answer for GSM8K
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge
+                )
+            else:
+                # Score completions to get reward metrics
+                rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                    input_prompt=question, 
+                    all_models=all_models, 
+                    train_model_completions=completions_text, 
+                    compare_model_completions=compare_completions_text,
+                    device=device,
+                    is_test=True,
+                    use_batched_eval=args.use_batch_judge,
+                    use_semi_batched_eval=args.use_semi_batch_judge,
+                    train_first=trained_first,
+                    train_pro=trained_pro if eval_class.contrastive else None
+                )
 
             # Track total comparisons and wins
             comparisons_this_question = len(trained_completions_text)
@@ -686,7 +712,7 @@ def compute_contrastive_loss(
 def grpo_loss(
         train_loader,
         all_models: dict,
-        question: str,
+        question: str,  # This might now be a tuple for GSM8K
         eval_class: evaluator.RewardEvaluator,
         device: str,
         round_num: int,
@@ -713,6 +739,16 @@ def grpo_loss(
         metrics: Dictionary containing training metrics
         reward: The total reward for this batch
     """
+
+    # Handle different dataset formats
+    if isinstance(question, tuple):
+        # GSM8K returns (prompt, gold_answer)
+        question, gold_answer = question
+    else:
+        # Other datasets return just the question
+        question = question
+        gold_answer = None
+
 
     prompt = [
         {'role': 'system', 'content': test_loader.pre_prompt},
@@ -892,8 +928,8 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
-    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Evaluator to use for scoring")
+    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
+    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
     # add objective_functionality
     parser.add_argument("--eval_type", type=str, default="pp", choices=["pp, pc"], help="Objective functionality to use for scoring")
 
@@ -1229,7 +1265,7 @@ if __name__ == "__main__":
         else:
             total_loss, train_metrics = grpo_loss(train_loader, all_models, question, train_eval_class, 
                                                 device, round_num, train_log_dir, args)
-        
+
         # Gradient accumulation
         total_loss = total_loss
         total_loss.backward()

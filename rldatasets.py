@@ -9,7 +9,7 @@ from tqdm import tqdm
 from datasets import load_dataset, Dataset
 from abc import ABC, abstractmethod
 from typing import Tuple, Any
-
+import pandas as pd
 
 
 class DataLoader(ABC):
@@ -534,20 +534,11 @@ def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
     return trainloader, testloader
 
 
-def get_dataloaders(dataset_name: str, contrastive: bool = False) -> Tuple[DataLoader, DataLoader]:
-    """
-    Factory function to get train and test data loaders for a specified dataset.
-    
-    Args:
-        dataset_name (str): Name of the dataset to load ('gsm8k', 'debate', 'ld', or 'chopped' currently supported)
-        
-    Returns:
-        Tuple[DataLoader, DataLoader]: Train and test data loaders
-        
-    Raises:
-        ValueError: If dataset_name is not supported
-    """
-    if dataset_name.lower() == 'debate':
+def get_dataloaders(dataset_name: str, contrastive: bool = False):
+    name = dataset_name.lower()
+    if dataset_name.lower() == "gsm8k":
+        return build_gsm8k_dataloaders()
+    elif dataset_name.lower() == "debate":
         return build_debate_contrastive_dataloaders() if contrastive else build_debate_dataloaders()
     elif dataset_name.lower() == 'ld':
         return build_ld_dataloaders()
@@ -555,6 +546,136 @@ def get_dataloaders(dataset_name: str, contrastive: bool = False) -> Tuple[DataL
         return build_chopped_dataloaders()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', and 'chopped' are available.")
+
+class GSM8KDataLoader(DataLoader):
+    """
+    Iterates over the GSM8K grade-school math dataset.
+
+    Each __next__ returns a tuple:
+        (prompt, gold_answer)
+
+    prompt  – already *includes* the pre-prompt + the raw question
+    gold_answer – the numeric answer string after the final '####'.
+    """
+    SPLITS = {
+        "train": "main/train-00000-of-00001.parquet",
+        "test":  "main/test-00000-of-00001.parquet",
+    }
+
+    def __init__(self, split: str = "train", random: bool = False) -> None:
+        super().__init__(random)
+        if split not in self.SPLITS:
+            raise ValueError("split must be 'train' or 'test'")
+
+        parquet_path = f"hf://datasets/openai/gsm8k/{self.SPLITS[split]}"
+        df = pd.read_parquet(parquet_path)
+
+        # HuggingFace parquet columns are `question` and `answer`
+        self.examples = df[["question", "answer"]].to_dict("records")
+
+        # ── prompts ────────────────────────────────────────────────
+        self.pre_prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n"
+            "... step-by-step derivation ...\n"
+            "</reasoning>\n"
+            "<answer>\n"
+            "... final numeric answer ...\n"
+            "</answer>"
+        )
+        self.system_prompt = SYSTEM_PROMPT
+
+    @classmethod
+    def from_dataframe(cls, df: pd.DataFrame, *, random: bool):
+        obj = cls.__new__(cls)           # bypass normal __init__
+        super(GSM8KDataLoader, obj).__init__(random)
+        obj.examples = df[["question", "answer"]].to_dict("records")
+        obj.pre_prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>"
+        )
+        obj.system_prompt = SYSTEM_PROMPT
+        obj.current_index = 0
+        return obj
+
+    # ── required ABC methods ──────────────────────────────────────
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __iter__(self) -> "GSM8KDataLoader":
+        return self
+
+    def __next__(self) -> tuple[str, str]:  # Return tuple instead of just str
+        if self.current_index >= len(self.examples):
+            raise StopIteration
+
+        idx = random.randint(0, len(self.examples) - 1) if self.random else self.current_index
+        if not self.random:
+            self.current_index += 1
+
+        ex = self.examples[idx]
+        question = ex["question"]
+        
+        # Extract gold answer
+        gold_answer = extract_hash_answer(ex["answer"])
+
+        prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>\n\n"
+            f"Question:\n{question}"
+        )
+        
+        return prompt, gold_answer  # Return both prompt and gold answer
+
+    # optional helper
+    def reset(self) -> None:
+        self.current_index = 0
+
+
+
+
+def build_gsm8k_dataloaders(
+    train_size = 500,
+    test_size  = 50,
+    seed = 42,
+) -> tuple[GSM8KDataLoader, GSM8KDataLoader]:
+    """
+    Build GSM-8K DataLoaders with optional down-sampling.
+
+    Args
+    ----
+    train_size : how many examples to keep from the 7 473-example train split.
+                 None  ⟶ keep them all.
+    test_size  : how many examples to keep from the 1 319-example test split.
+                 None  ⟶ keep them all.
+    seed       : RNG seed so the same subset is repeatable.
+
+    Returns
+    -------
+    (trainloader, testloader)
+    """
+    rng = random.Random(seed)
+
+    # ---------- load full parquet files ----------
+    def load_parquet(rel_path: str) -> pd.DataFrame:
+        return pd.read_parquet(f"hf://datasets/openai/gsm8k/{rel_path}")
+
+    train_df = load_parquet(GSM8KDataLoader.SPLITS["train"])
+    test_df  = load_parquet(GSM8KDataLoader.SPLITS["test"])
+
+    # ---------- optional down-sample ----------
+    if train_size is not None and train_size < len(train_df):
+        train_df = train_df.sample(n=train_size, random_state=seed).reset_index(drop=True)
+    if test_size is not None and test_size < len(test_df):
+        test_df  = test_df.sample(n=test_size,  random_state=seed+1).reset_index(drop=True)
+
+    # feed the *dataframes* straight into the loader
+    trainloader = GSM8KDataLoader.from_dataframe(train_df, random=True)
+    testloader  = GSM8KDataLoader.from_dataframe(test_df,  random=False)
+    return trainloader, testloader
 
 
 if __name__ == "__main__": 
