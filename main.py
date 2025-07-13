@@ -85,7 +85,7 @@ def eval_on_test_set(
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
-            f.write(f"Question #{num_question}\n")
+            f.write(f"Question #{num_question} - Trained spoke first: {trained_first}\n")
             f.write("="*80 + "\n\n")
             f.write("Prompt judge:\n")
             

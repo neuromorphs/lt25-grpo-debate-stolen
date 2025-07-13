@@ -134,25 +134,6 @@ class DebateEvaluator(RewardEvaluator):
         except:
             return text  # Fallback if format is incorrect
    
-    # def _strict_format_reward(self, completions) -> List[float]:
-    #     """Reward for strict XML format."""
-    #     # for i in range(16):
-    #     #     print(f"Completion {i}: {completions[i][:100]}")
-    #     #     print(f"{completions[i][-100:]}")
-    #     pattern = r"^<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>\n?$"
-    #     print(completions[0])
-    #     print(bool(re.match(pattern, completions[0])))
-    #     matches = [bool(re.match(pattern, r)) for r in completions]
-    #     return [0.5 if m else 0.0 for m in matches]
-
-    # def _soft_format_reward(self, completions) -> List[float]:
-    #     """Reward for relaxed XML format."""
-    #     pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
-    #     print(completions[0])
-    #     print(bool(re.match(pattern, completions[0])))
-    #     matches = [bool(re.match(pattern, r)) for r in completions]
-    #     return [0.5 if m else 0.0 for m in matches]
-
     def _soft_format_reward(self, completions) -> List[float]:
         """Reward for relaxed XML format."""
         pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
@@ -182,7 +163,12 @@ class DebateEvaluator(RewardEvaluator):
             if "<answer>" in text and "</answer>" in text:
                 answer = text.split("<answer>")[-1].split("</answer>")[0].strip()
                 if len(answer) < 250:
-                    count -= 0.25
+                    count -= (0.5 + (250 - len(answer)) / 125)  # Scale penalty by length
+                elif len(answer) > 500:
+                    count -= (0.5 + (len(answer) - 500) / 125)
+                else:
+                    count += 0.5
+            
             
             # Only penalize actual content after final tag
             if "</answer>" in text:
