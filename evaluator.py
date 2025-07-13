@@ -101,7 +101,7 @@ class DebateEvaluator(RewardEvaluator):
     def __init__(self, contrastive: bool = False) -> None:
         self.num_reward_functions = 4  # debate score + 3 format rewards
         self.contrastive = contrastive  # If True, no position is assigned, just the topic
-        judge_constrastive_prompt = "opposite sides (PRO vs CON)" if contrastive else "the same side (PRO or CON)" 
+        judge_constrastive_prompt = "for different answers"
         self.judge_prompt = f"""You are an impartial debate judge. You will be shown two debate responses on the same topic, 
         arguing {judge_constrastive_prompt}. Your task is to determine which argument was more compelling based on:
         1. Logical reasoning and evidence
@@ -112,11 +112,9 @@ class DebateEvaluator(RewardEvaluator):
         
         Topic: {{topic}}
         
-        Argument 1:
-        {{arg1_response}}
+        Argument 1 {{arg1_response}}
         
-        Argument 2:
-        {{arg2_response}}
+        Argument 2 {{arg2_response}}
         
         Which response was more compelling? Respond with EXACTLY one of these options:
         - ARGUMENT_1_WINS
@@ -207,6 +205,7 @@ class DebateEvaluator(RewardEvaluator):
                 response1 = self._extract_xml_answer(train_model_completions[i])
                 response2 = self._extract_xml_answer(train_model_completions[j])
                 
+                response1 = f"Defending"
                 judge_prompt = self.judge_prompt.format(
                     topic=topic,
                     arg1_response=response1,
@@ -529,7 +528,7 @@ class DebateEvaluator(RewardEvaluator):
         # Track wins/losses for each completion
         wins = torch.zeros((num_completions, num_completions), device=device)
         
-        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question'].split('\nPosition:')[0].split("Debate Topic: ")[1]
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -541,10 +540,16 @@ class DebateEvaluator(RewardEvaluator):
                 response1 = self._extract_xml_answer(first_model_completions[i])
                 response2 = self._extract_xml_answer(second_model_completions[j])
                 
+                # TODO: modify based on order of pro/con
+                response1= f""" defending answer {input_prompt['pro_prompt']}:
+                {response1}"""
+                response2 = f""" defending answer {input_prompt['con_prompt']}:
+                {response2}"""
+                
                 judge_prompt = self.judge_prompt.format(
                     topic=topic,
-                    arg1_response=response1,
-                    arg2_response=response2
+                    arg1_response=response1, # gather the answer and add it
+                    arg2_response=response2 
                 )
                 
                 judge_prompts.append(judge_prompt)
@@ -640,7 +645,7 @@ class DebateEvaluator(RewardEvaluator):
 
     def _compute_test_rewards(
         self,
-        prompt: str,
+        input_prompt: Dict[str, str],
         all_models: Dict[str, Any],
         train_model_completions: List[str],
         compare_model_completions: List[str],
@@ -664,20 +669,26 @@ class DebateEvaluator(RewardEvaluator):
             self._xml_count_reward(train_model_completions), 
             device=device
         )
-        
-        topic = prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
-        
+
+        topic = input_prompt['question'].split('\nPosition:')[0].split("Debate Topic: ")[1]
+
         for i in range(num_debates):
-            # Get trained model's response
+            # Get trained model's response 
             trained_response = self._extract_xml_answer(train_model_completions[i])
             
             # Get compare model's response
-            compare_response = self._extract_xml_answer(compare_model_completions[i])     
+            compare_response = self._extract_xml_answer(compare_model_completions[i]) 
+
+
+            trained_response = f""" defending answer {input_prompt['pro_prompt']}:
+            {trained_response}"""
+            compare_response = f""" defending answer {input_prompt['con_prompt']}:
+            {compare_response}"""
 
             # Format judge prompt
             judge_prompt = self.judge_prompt.format(
                 topic=topic,
-                arg1_response=trained_response,
+                arg1_response=trained_response, # change stuff
                 arg2_response=compare_response
             )
             
@@ -729,10 +740,10 @@ class DebateEvaluator(RewardEvaluator):
             return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
         else:
             # print("Computing training rewards using round-robin tournament scoring")
-            if use_batched_eval:
+            if use_batched_eval: 
                 # print("Using batched evaluation for training rewards")
                 return self._compute_train_rewards_batched(input_prompt, all_models, train_model_completions, device)
-            elif use_semi_batched_eval:
+            elif use_semi_batched_eval: 
                 # print("Using semi-batched evaluation for training rewards")
                 if self.contrastive: 
                     return self._compute_train_contrastive_rewards_semi_batched(input_prompt, all_models, train_model_completions, compare_model_completions, device)

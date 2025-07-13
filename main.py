@@ -149,9 +149,14 @@ def eval_on_test_set(
                     )
                     compare_completions_text.append(completion)
 
+            input_prompt = {
+                'question': question,
+                'pro_prompt': pro_prompt[1]['content'],
+                'con_prompt': con_prompt[1]['content'],
+            }
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=question, 
+                input_prompt=input_prompt, 
                 all_models=all_models, 
                 train_model_completions=completions_text, 
                 compare_model_completions=compare_completions_text,
@@ -431,7 +436,7 @@ def score_completions(
 def score_contrastive_completions(
     pro_completions_text: list[str],
     con_completions_text: list[str],
-    question: str,
+    input_prompt: str,
     eval_class: evaluator.RewardEvaluator,
     device: str,
     args: argparse.Namespace
@@ -441,7 +446,7 @@ def score_contrastive_completions(
     
     Args:
         completions_text: List of generated completion strings
-        question: Original input question/prompt
+        input_prompt: Original input question/prompt
         answer: Ground truth answer
         eval_class: Evaluator class for computing rewards
         device: Device to place tensors on
@@ -466,7 +471,7 @@ def score_contrastive_completions(
     # Format inputs as expected by evaluator
     # Get rewards and metrics from evaluator
     pro_first_rewards_per_func, pro_first_metrics, con_second_debate_score = eval_class.compute_rewards(
-        input_prompt=question,
+        input_prompt=input_prompt,
         all_models=all_models, 
         train_model_completions=pro_completions_text,
         compare_model_completions=con_completions_text, 
@@ -476,7 +481,7 @@ def score_contrastive_completions(
         use_semi_batched_eval=args.use_semi_batch_judge
     )
     con_first_rewards_per_func, con_first_metrics, first_second_debate_score = eval_class.compute_rewards(
-        input_prompt=question,
+        input_prompt=input_prompt,
         all_models=all_models, 
         train_model_completions=con_completions_text, # TODO: the argument name from the function is confusing
         compare_model_completions=pro_completions_text, # TODO: the argument name from the function is confusing
@@ -485,12 +490,22 @@ def score_contrastive_completions(
         use_batched_eval=args.use_batch_judge,
         use_semi_batched_eval=args.use_semi_batch_judge
     )
-    pro_first_rewards_per_func[:, 0] += first_second_debate_score
-    pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
-    con_first_rewards_per_func[:, 0] += con_second_debate_score
-    con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
-    pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
-    con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+    if args.dataset_name == "code_debate":
+        # lign/column average
+        pro_first_rewards_per_func[:, 0] += first_second_debate_score
+        pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models (positions)
+        con_first_rewards_per_func[:, 0] = 1- con_first_rewards_per_func[:, 0]
+        con_first_rewards_per_func[:, 0] += (1-con_second_debate_score)
+        con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
+        pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+        con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+    else: 
+        pro_first_rewards_per_func[:, 0] += first_second_debate_score
+        pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
+        con_first_rewards_per_func[:, 0] += con_second_debate_score
+        con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
+        pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+        con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
 
     # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
     # Store generation data
@@ -809,6 +824,12 @@ def grpo_contrastive_loss(
             {'role': 'system', 'content': train_loader.pre_prompt},
             {'role': 'user', 'content': question + "Position: CON"}
         ]
+    
+    input_prompt = {
+        'question': question,
+        'pro_prompt': pro_prompt[1]['content'],
+        'con_prompt': con_prompt[1]['content'],
+    }
 
     prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(pro_prompt, tokenize=False)
     prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(con_prompt, tokenize=False)
@@ -825,7 +846,7 @@ def grpo_contrastive_loss(
     
     # Score completions (cross-comparison between PRO and CON)
     pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data = score_contrastive_completions(
-        pro_completions_text, con_completions_text, question, eval_class, device, args
+        pro_completions_text, con_completions_text, input_prompt, eval_class, device, args
     )
 
     def compute_contrastive_advantages(
