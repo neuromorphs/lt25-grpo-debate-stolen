@@ -183,7 +183,7 @@ def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
     ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = int(total_topics * 0.15)
+    test_size = 1 # int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
@@ -255,7 +255,7 @@ def build_debate_contrastive_dataloaders() -> Tuple[DebateDataLoader, DebateData
     ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = int(total_topics * 0.15)
+    test_size = 1 #int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
@@ -400,6 +400,163 @@ def build_ld_dataloaders() -> Tuple[LDDataLoader, LDDataLoader]:
     return trainloader, testloader
 
 
+class CodeComprehensionDataLoader(DataLoader):
+    """
+    A loader class that provides iteration over string manipulation tasks from the CodeComprehension dataset.
+    
+    This class implements both sequential and random access to code comprehension problems through
+    standard Python iterator protocols. It focuses specifically on string manipulation tasks,
+    filtering the dataset to include only problems that involve string operations.
+    """
+    
+    def __init__(self, random: bool = False, max_samples: int = None) -> None:
+        super().__init__(random)
+        self.max_samples = max_samples
+        self.string_examples = []
+        self._load_string_manipulation_examples()
+        self.pre_prompt = """You will be given a Python code snippet that performs string manipulation operations.
+            You should trace through the code execution step by step, then determine the final result.
+            It is very important that you put your reasoning process inside <reasoning> tags and your final answer inside <answer> tags, like this:
+
+            <reasoning>
+            Your step-by-step reasoning process here, tracing through each line of code:
+            1. Initial variable values
+            2. Each operation and its result
+            3. Final variable state
+            </reasoning>
+            <answer>
+            The final result/value that gets printed or assigned to the result variable
+            </answer>
+
+            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! 
+            Start each response by immediately starting with <reasoning>. 
+            """
+        self.system_prompt = SYSTEM_PROMPT
+        
+    def _load_string_manipulation_examples(self) -> None:
+        """Load and filter examples that involve string manipulation."""
+        from datasets import load_dataset
+        
+        dataset = load_dataset('imbue/code-comprehension')
+        string_functions = [
+            'str(', '.islower()', '.isdigit()', '.upper()', '.lower()', '.strip()', 
+            '.replace(', '.split(', '.join(', 'len(', '.swapcase()', '.isalpha()', 
+            '.startswith(', '.endswith(', '.find(', '.count(', '.capitalize()', 
+            '.title(', '.isnumeric(', '.isalnum(', '.lstrip(', '.rstrip()'
+        ]
+        
+        max_check = self.max_samples * 2 if self.max_samples else len(dataset['train'])
+        
+        for i in range(min(max_check, len(dataset['train']))):
+            example = dataset['train'][i]
+            question = example['question']
+            
+            # Check if this involves string manipulation
+            if any(func in question for func in string_functions):
+                self.string_examples.append(example)
+                if self.max_samples and len(self.string_examples) >= self.max_samples:
+                    break
+                    
+    def __len__(self) -> int:
+        return len(self.string_examples)
+        
+    def __iter__(self) -> 'CodeComprehensionDataLoader':
+        return self
+        
+    def __next__(self) -> tuple[str, list[str], int]:
+        if self.current_index >= len(self.string_examples):
+            raise StopIteration
+        
+        if self.random:
+            idx = random.randint(0, len(self.string_examples) - 1)
+        else:
+            idx = self.current_index
+            self.current_index += 1
+            
+        example = self.string_examples[idx]
+        
+        # Format the question - the dataset already includes the question format
+        formatted_question = example['question']
+        choices = example['choices']
+        correct_answer = example['correct_answer']
+        
+        # Find the index of the correct answer in choices
+        try:
+            correct_idx = choices.index(correct_answer)
+        except ValueError:
+            # If exact match not found, set to 0 as fallback
+            correct_idx = 0
+        
+        return formatted_question, choices, correct_idx
+
+    def reset(self):
+        self.current_index = 0
+        
+    def get_choices_and_answer(self, idx: int = None) -> tuple[list[str], str]:
+        """Get the choices and correct answer for a specific example."""
+        if idx is None:
+            idx = self.current_index - 1 if self.current_index > 0 else 0
+        
+        if idx >= len(self.string_examples):
+            raise IndexError("Index out of range")
+            
+        example = self.string_examples[idx]
+        return example['choices'], example['correct_answer']
+
+
+def build_codecomprehension_dataloaders(max_train_samples: int = 1000, max_test_samples: int = 200) -> Tuple[CodeComprehensionDataLoader, CodeComprehensionDataLoader]:
+    """
+    Build train and test data loaders for CodeComprehension string manipulation tasks.
+    
+    Args:
+        max_train_samples: Maximum number of training samples to load
+        max_test_samples: Maximum number of test samples to load
+        
+    Returns:
+        Tuple of (train_loader, test_loader)
+    """
+    from datasets import load_dataset
+    
+    dataset = load_dataset('imbue/code-comprehension')
+    string_functions = [
+        'str(', '.islower()', '.isdigit()', '.upper()', '.lower()', '.strip()', 
+        '.replace(', '.split(', '.join(', 'len(', '.swapcase()', '.isalpha()', 
+        '.startswith(', '.endswith(', '.find(', '.count(', '.capitalize()', 
+        '.title(', '.isnumeric(', '.isalnum(', '.lstrip(', '.rstrip()'
+    ]
+    
+    # Filter for string manipulation examples
+    string_examples = []
+    for i in range(len(dataset['train'])):
+        example = dataset['train'][i]
+        question = example['question']
+        
+        if any(func in question for func in string_functions):
+            string_examples.append(example)
+            
+    # Split into train/test (80/20 split)
+    total_examples = len(string_examples)
+    test_size = min(max_test_samples, int(total_examples * 0.2))
+    train_size = min(max_train_samples, total_examples - test_size)
+    
+    # Generate random indices for test set
+    test_indices = random.sample(range(total_examples), test_size)
+    test_indices_set = set(test_indices)
+    
+    # Split examples
+    train_examples = [example for i, example in enumerate(string_examples) if i not in test_indices_set][:train_size]
+    test_examples = [string_examples[i] for i in test_indices]
+    
+    # Create custom loaders with pre-filtered data
+    trainloader = CodeComprehensionDataLoader(random=True)
+    trainloader.string_examples = train_examples
+    
+    testloader = CodeComprehensionDataLoader(random=False)
+    testloader.string_examples = test_examples
+    
+    return trainloader, testloader
+
+
 class ChoppedDataLoader(DataLoader):
     """
     A loader class that provides iteration over mystery baskets for Chopped-style recipe generation.
@@ -534,18 +691,168 @@ def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
     return trainloader, testloader
 
 
-def get_dataloaders(dataset_name: str, contrastive: bool = False):
-    name = dataset_name.lower()
+def get_dataloaders(dataset_name: str, contrastive: bool = False, max_train_samples: int = None, max_test_samples: int = None) -> Tuple[DataLoader, DataLoader]:
+    """
+    Factory function to get train and test data loaders for a specified dataset.
+    
+    Args:
+        dataset_name (str): Name of the dataset to load ('debate', 'ld', 'chopped', or 'codecomprehension' currently supported)
+        contrastive (bool): Whether to use contrastive version (only for debate dataset)
+        max_train_samples (int): Maximum number of training samples (only for codecomprehension dataset)
+        max_test_samples (int): Maximum number of test samples (only for codecomprehension dataset)
+        
+    Returns:
+        Tuple[DataLoader, DataLoader]: Train and test data loaders
+        
+    Raises:
+        ValueError: If dataset_name is not supported
+    """
+    print(f"Loading dataset: {dataset_name} (contrastive={contrastive})")
     if dataset_name.lower() == "gsm8k":
         return build_gsm8k_dataloaders()
-    elif dataset_name.lower() == "debate":
+    if dataset_name.lower() == 'debate':
         return build_debate_contrastive_dataloaders() if contrastive else build_debate_dataloaders()
     elif dataset_name.lower() == 'ld':
         return build_ld_dataloaders()
     elif dataset_name.lower() == 'chopped':
         return build_chopped_dataloaders()
+    elif dataset_name.lower() == 'debate_code':
+        # Use default values if not specified
+        train_samples = max_train_samples if max_train_samples is not None else 10
+        test_samples = max_test_samples if max_test_samples is not None else 2
+        return build_codecomprehension_dataloaders(train_samples, test_samples)
     else:
-        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', and 'chopped' are available.")
+        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', 'chopped', 'gsm8k' and 'debate_code' are available.")
+
+class GSM8KDataLoader(DataLoader):
+    """
+    Iterates over the GSM8K grade-school math dataset.
+
+    Each __next__ returns a tuple:
+        (prompt, gold_answer)
+
+    prompt  – already *includes* the pre-prompt + the raw question
+    gold_answer – the numeric answer string after the final '####'.
+    """
+    SPLITS = {
+        "train": "main/train-00000-of-00001.parquet",
+        "test":  "main/test-00000-of-00001.parquet",
+    }
+
+    def __init__(self, split: str = "train", random: bool = False) -> None:
+        super().__init__(random)
+        if split not in self.SPLITS:
+            raise ValueError("split must be 'train' or 'test'")
+
+        parquet_path = f"hf://datasets/openai/gsm8k/{self.SPLITS[split]}"
+        df = pd.read_parquet(parquet_path)
+
+        # HuggingFace parquet columns are `question` and `answer`
+        self.examples = df[["question", "answer"]].to_dict("records")
+
+        # ── prompts ────────────────────────────────────────────────
+        self.pre_prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n"
+            "... step-by-step derivation ...\n"
+            "</reasoning>\n"
+            "<answer>\n"
+            "... final numeric answer ...\n"
+            "</answer>"
+        )
+        self.system_prompt = SYSTEM_PROMPT
+
+    @classmethod
+    def from_dataframe(cls, df: pd.DataFrame, *, random: bool):
+        obj = cls.__new__(cls)           # bypass normal __init__
+        super(GSM8KDataLoader, obj).__init__(random)
+        obj.examples = df[["question", "answer"]].to_dict("records")
+        obj.pre_prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>"
+        )
+        obj.system_prompt = SYSTEM_PROMPT
+        obj.current_index = 0
+        return obj
+
+    # ── required ABC methods ──────────────────────────────────────
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __iter__(self) -> "GSM8KDataLoader":
+        return self
+
+    def __next__(self) -> tuple[str, str]:  # Return tuple instead of just str
+        if self.current_index >= len(self.examples):
+            raise StopIteration
+
+        idx = random.randint(0, len(self.examples) - 1) if self.random else self.current_index
+        if not self.random:
+            self.current_index += 1
+
+        ex = self.examples[idx]
+        question = ex["question"]
+        
+        # Extract gold answer
+        gold_answer = extract_hash_answer(ex["answer"])
+
+        prompt = (
+            "Solve the following grade-school math word problem.\n"
+            "Respond ONLY in this format:\n"
+            "<reasoning>\n...\n</reasoning>\n<answer>\n...\n</answer>\n\n"
+            f"Question:\n{question}"
+        )
+        
+        return prompt, gold_answer  # Return both prompt and gold answer
+
+    # optional helper
+    def reset(self) -> None:
+        self.current_index = 0
+
+
+
+
+def build_gsm8k_dataloaders(
+    train_size = 500,
+    test_size  = 50,
+    seed = 42,
+) -> tuple[GSM8KDataLoader, GSM8KDataLoader]:
+    """
+    Build GSM-8K DataLoaders with optional down-sampling.
+
+    Args
+    ----
+    train_size : how many examples to keep from the 7 473-example train split.
+                 None  ⟶ keep them all.
+    test_size  : how many examples to keep from the 1 319-example test split.
+                 None  ⟶ keep them all.
+    seed       : RNG seed so the same subset is repeatable.
+
+    Returns
+    -------
+    (trainloader, testloader)
+    """
+    rng = random.Random(seed)
+
+    # ---------- load full parquet files ----------
+    def load_parquet(rel_path: str) -> pd.DataFrame:
+        return pd.read_parquet(f"hf://datasets/openai/gsm8k/{rel_path}")
+
+    train_df = load_parquet(GSM8KDataLoader.SPLITS["train"])
+    test_df  = load_parquet(GSM8KDataLoader.SPLITS["test"])
+
+    # ---------- optional down-sample ----------
+    if train_size is not None and train_size < len(train_df):
+        train_df = train_df.sample(n=train_size, random_state=seed).reset_index(drop=True)
+    if test_size is not None and test_size < len(test_df):
+        test_df  = test_df.sample(n=test_size,  random_state=seed+1).reset_index(drop=True)
+
+    # feed the *dataframes* straight into the loader
+    trainloader = GSM8KDataLoader.from_dataframe(train_df, random=True)
+    testloader  = GSM8KDataLoader.from_dataframe(test_df,  random=False)
+    return trainloader, testloader
 
 class GSM8KDataLoader(DataLoader):
     """
@@ -679,4 +986,34 @@ def build_gsm8k_dataloaders(
 
 
 if __name__ == "__main__": 
-    trainloader, testloader = get_dataloaders('debate')
+    # Example usage for CodeComprehension dataset
+    print("=== CodeComprehension Dataset Example ===")
+    trainloader, testloader = get_dataloaders('codecomprehension', max_train_samples=50, max_test_samples=10)
+    
+    print(f"Training samples: {len(trainloader)}")
+    print(f"Test samples: {len(testloader)}")
+    
+    # Show a few training examples
+    print("\n--- Training Examples ---")
+    for i, (question, choices, correct_idx) in enumerate(trainloader):
+        if i >= 2:
+            break
+        print(f"\nExample {i+1}:")
+        print(f"Question: {question}")
+        print(f"Choices: {choices}")
+        print(f"Correct Answer Index: {correct_idx}")
+        print(f"Correct Answer: {choices[correct_idx]}")
+        print("-" * 50)
+    
+    # Reset and show test example
+    testloader.reset()
+    print("\n--- Test Example ---")
+    test_question, test_choices, test_correct_idx = next(testloader)
+    print(f"Question: {test_question}")
+    print(f"Choices: {test_choices}")
+    print(f"Correct Answer Index: {test_correct_idx}")
+    print(f"Correct Answer: {test_choices[test_correct_idx]}")
+    
+    # Show the pre_prompt
+    print("\n--- Pre-prompt Template ---")
+    print(trainloader.pre_prompt)

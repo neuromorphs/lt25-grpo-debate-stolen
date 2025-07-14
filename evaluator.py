@@ -67,7 +67,7 @@ class RewardEvaluator(ABC):
         pass
 
 
-def get_evaluator(name: str, contrastive: bool = False) -> RewardEvaluator:
+def get_evaluator(name: str, contrastive: bool = False, truth_comparison: bool = False) -> RewardEvaluator:
     """
     Get the appropriate reward evaluator for a given task.
     
@@ -84,8 +84,8 @@ def get_evaluator(name: str, contrastive: bool = False) -> RewardEvaluator:
     n = name.lower()
     if n == "gsm8k":
         return GSM8KEvaluator()
-    elif n == "debate":
-        return DebateEvaluator(contrastive=contrastive)
+    elif n in ["debate", "debate_code"]:
+        return DebateEvaluator(contrastive=contrastive, truth_comparison=truth_comparison)
     elif n == "ld":
         return LDEvaluator()
     elif n == "chopped":
@@ -102,10 +102,11 @@ class DebateEvaluator(RewardEvaluator):
     2. For testing: head-to-head debates against the base model
     """
     
-    def __init__(self, contrastive: bool = False) -> None:
+    def __init__(self, contrastive: bool = False, truth_comparison: bool = False) -> None:
         self.num_reward_functions = 4  # debate score + 3 format rewards
         self.contrastive = contrastive  # If True, no position is assigned, just the topic
         judge_constrastive_prompt = "opposite sides (PRO vs CON)" if contrastive else "the same side (PRO or CON)" 
+        judge_constrastive_prompt = judge_constrastive_prompt if not truth_comparison else "for different answers"
         self.judge_prompt = f"""\n
         You are an impartial debate judge. You will be shown two debate responses on the same topic, arguing {judge_constrastive_prompt}. 
         Your task is to determine which argument was more compelling based on:
@@ -117,11 +118,9 @@ class DebateEvaluator(RewardEvaluator):
         
         Topic: {{topic}}
         
-        Argument 1:
-        {{arg1_response}}
+        Argument 1 {{arg1_response}}
         
-        Argument 2:
-        {{arg2_response}}
+        Argument 2 {{arg2_response}}
         
         Which response was more compelling? Respond with EXACTLY one of these options:
         - ARGUMENT_1_WINS
@@ -185,7 +184,7 @@ class DebateEvaluator(RewardEvaluator):
     
     def _compute_train_rewards(
         self,
-        input_prompt: str,
+        input_prompt: Dict[str, str], # TODO: check why the signature needs 2 strings
         all_models: Dict[str, Any],
         train_model_completions: List[str],
         device: str
@@ -198,7 +197,7 @@ class DebateEvaluator(RewardEvaluator):
         wins = torch.zeros(num_completions, device=device)
         losses = torch.zeros(num_completions, device=device)
         
-        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -319,7 +318,7 @@ class DebateEvaluator(RewardEvaluator):
         # Track wins/losses for each completion
         wins = torch.zeros((num_completions, num_completions), device=device)
         
-        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -330,18 +329,22 @@ class DebateEvaluator(RewardEvaluator):
             for j in range(num_completions):
                 response1 = self._extract_xml_answer(first_model_completions[i])
                 response2 = self._extract_xml_answer(second_model_completions[j])
+                
                 if self.contrastive:
                     if pro_first:
-                        response1 = 'PRO: ' + response1
-                        response2 = 'CON: ' + response2
+                        response1 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response1
+                        response2 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response2
                     else:
-                        response1 = 'CON: ' + response1
-                        response2 = 'PRO: ' + response2
-                
+                        response1 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response1
+                        response2 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response2
+                else:
+                    response1 = ':\n' + response1
+                    response2 = ':\n' + response2
+
                 judge_prompt = self.judge_prompt.format(
                     topic=topic,
-                    arg1_response=response1,
-                    arg2_response=response2
+                    arg1_response=response1, # gather the answer and add it
+                    arg2_response=response2 
                 )
                 
                 judge_prompts.append(judge_prompt)
@@ -437,7 +440,7 @@ class DebateEvaluator(RewardEvaluator):
 
     def _compute_test_rewards(
         self,
-        prompt: str,
+        input_prompt: Dict[str, str],
         all_models: Dict[str, Any],
         train_model_completions: List[str],
         compare_model_completions: List[str],
@@ -450,6 +453,13 @@ class DebateEvaluator(RewardEvaluator):
         # trained_spoke_first = torch.zeros(num_debates, device=device) # TODO: more granualar random choice
         rewards_per_func = torch.zeros(num_debates, self.num_reward_functions, device=device)
         wins = 0
+        wins_defending_truth = 0
+        wins_defending_false = 0
+        get_truth_defending_truth = 0
+        get_truth_defending_false = 0
+        score = 0.0
+        # total_defending_truth = 0
+        # total_defending_false = 0
         
         # Get format rewards
         strict_format = torch.tensor(
@@ -464,65 +474,76 @@ class DebateEvaluator(RewardEvaluator):
             self._xml_count_reward(train_model_completions), 
             device=device
         )
-        
-        topic = prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
-        
+
+        topic = input_prompt['question']
+
         if train_first is None:
             raise ValueError("train_first must be specified")
         
         # Prepare all judge prompts at once
         judge_prompts = []
         for i in range(num_debates):
+            # Get trained model's response
             trained_response = self._extract_xml_answer(train_model_completions[i])
             compare_response = self._extract_xml_answer(compare_model_completions[i])
             
             if self.contrastive:
-                stances = ('PRO: ', 'CON: ') if train_pro else ('CON: ', 'PRO: ')
-                responses = (trained_response, compare_response) if train_first else (compare_response, trained_response)
-                arg1 = stances[0] + responses[0]
-                arg2 = stances[1] + responses[1]
+                # If contrastive, prepend PRO/CON based on position
+                # check that train_first is not None
+                if train_first: 
+                    arg1 = 'defending the answer ' 
+                    arg1 += input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg1 += trained_response
+                    arg2 = 'defending the answer ' 
+                    arg2 += input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg2 += compare_response
+                else:
+                    arg1 = 'defending the answer ' 
+                    arg1 += input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg1 += compare_response
+                    arg2 = 'defending the answer ' 
+                    arg2 += input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg2 += trained_response
             else:
-                arg1, arg2 = (trained_response, compare_response) if train_first else (compare_response, trained_response)
+                if train_first is None:
+                    arg1 = ':\n' +trained_response
+                    arg2 = ':\n' +compare_response
+                else:
+                    arg1 = ':\n' +compare_response
+                    arg2 = ':\n' +trained_response
 
+
+            # Format judge prompt
             judge_prompt = self.judge_prompt.format(
                 topic=topic,
                 arg1_response=arg1,
                 arg2_response=arg2
             )
-            judge_prompts.append(judge_prompt)
-        
-        # Batch evaluate all judge prompts
-        if hasattr(all_models["judge_model"], 'generate_batch_prompts'):
-            judge_responses = all_models["judge_model"].generate_batch_prompts(
+            judge_response = all_models["judge_model"].generate(
                 system_prompt="You are an impartial debate judge.",
-                user_prompts=judge_prompts,
+                user_prompt=judge_prompt,
                 max_new_tokens=50,
                 temperature=0.1
-            )
-        else:
-            # Fallback to sequential evaluation
-            judge_responses = []
-            for judge_prompt in judge_prompts:
-                response = all_models["judge_model"].generate(
-                    system_prompt="You are an impartial debate judge.",
-                    user_prompt=judge_prompt,
-                    max_new_tokens=50,
-                    temperature=0.1
-                )
-                judge_responses.append(response)
-        
-        # Process judge responses
-        for i, judge_response in enumerate(judge_responses):
-            judge_response = judge_response.strip().upper()
-            
+            ).strip().upper()
+
+            # persuasion metrics
+            trained_win = False
             if train_first:
                 if "ARGUMENT_1_WINS" in judge_response:
                     rewards_per_func[i, 0] = 1.0
                     wins += 1
+                    trained_win = True
             else:
                 if "ARGUMENT_2_WINS" in judge_response:
                     rewards_per_func[i, 0] = 1.0
                     wins += 1
+                    trained_win = True
+            # truth metrics
+            if trained_win and train_pro:
+                get_truth_defending_truth += 1
+            if not(trained_win) and not train_pro:
+                get_truth_defending_false += 1
+
 
             # Add format rewards
             rewards_per_func[i, 1] = strict_format[i]
@@ -532,6 +553,9 @@ class DebateEvaluator(RewardEvaluator):
         win_rate = wins / num_debates
         metrics = {
             "win_rate": win_rate,
+            "truth_rate": (get_truth_defending_truth + wins_defending_truth) / num_debates,
+            "truth_rate_defending_truth": get_truth_defending_truth / (num_debates/2),
+            "truth_rate_defending_false": get_truth_defending_false / (num_debates/2),
             "reward": rewards_per_func.mean().item(),
             "num_wins": wins,
             "num_debates": num_debates,

@@ -24,6 +24,7 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
 
+
 def eval_on_test_set(
     all_models: dict,
     test_loader: rldatasets.DataLoader,
@@ -44,6 +45,9 @@ def eval_on_test_set(
     trained_spoke_first = 0  # Track which model spoke first
     trained_defended_pro = 0  # Track if trained model is PRO in contrastive setup
     win_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_truth = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_false = torch.zeros(len(test_loader), device=device)
     num_question = 0
     total_wins = 0
 
@@ -54,49 +58,65 @@ def eval_on_test_set(
         total_comparisons = 0
         total_wins = 0
         
-        for question in tqdm(test_loader, desc="Evaluating on test set"):
+        # # Code debate specific metrics
+        # if args.dataset_name == "debate_code":
+        #     correct_defense_wins = 0
+        #     correct_defense_comparisons = 0
+        
+        for item in tqdm(test_loader, desc="Evaluating on test set"):
             num_question += 1
+            
+            # Handle different dataset formats
+            if args.dataset_name.lower() == "debate_code":
+                question, choices, correct_idx = item
+                possible_positions = {
+                    'PRO': choices[correct_idx],  # PRO stance is defending the correct answer
+                    'CON': random.choice([c for i, c in enumerate(choices) if i != correct_idx])  # CON stance is defending a random incorrect answer
+                }
+                gold_answer = choices[correct_idx]  # Gold answer is the correct choice
+            elif args.dataset_name.lower() == "gsm8k":
+                question, gold_answer = item  
+                if eval_class.contrastive:
+                    possible_positions = {
+                        'PRO': gold_answer,  # PRO stance is defending the gold answer
+                        'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
+                    }
+                else:
+                    possible_positions = {
+                        'PRO': None, 
+                        'CON': None 
+                    }
+            else:
+                question = item
+                possible_positions = {
+                    'PRO': 'PRO',  # Default PRO stance
+                    'CON': 'CON'  # Default CON stance
+                }
             trained_first = random.choice([True, False])  # Randomly choose which models goes first
             trained_spoke_first += 1 if trained_first else 0
-
-            if args.dataset_name.lower() == "gsm8k":
-                question, gold_answer = question  # GSM8K returns tuple
-                # 1. Prepare prompting
+            if eval_class.contrastive:
+                trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
+                trained_defended_pro += 1 if trained_pro else 0
+                pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
+                con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
+                trained_prompt = [
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': pro_question if trained_pro else con_question},
+                ]
+                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+                compare_prompt = con_question if trained_pro else pro_question
+                compare_prompt_text = [
+                    {'role': 'system', 'content': test_loader.pre_prompt},
+                    {'role': 'user', 'content': compare_prompt}
+                ]
+            else:
                 trained_prompt = [
                     {'role': 'system', 'content': test_loader.pre_prompt},
                     {'role': 'user', 'content': question}
                 ]
-                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
                 compare_prompt = question
-            else:
-                gold_answer = None
+                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
 
-                if eval_class.contrastive:
-                    pro_question = question + f'Position: PRO'  # Append stance to question
-                    con_question = question + f'Position: CON'
-                    # TODO: 
-                    trained_pro = random.choice([True, False])  # Randomly choose which model is trained
-                    trained_defended_pro += 1 if trained_pro else 0
-                    trained_prompt = [
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': pro_question if trained_pro else con_question}
-                    ]
-                    compare_prompt = [ # ONLY USED FOR LOGGING IN THE TXT FILE
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': con_question if trained_pro else pro_question}
-                    ]
-                    trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-                    compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt, tokenize=False) # ONLY USED FOR LOGGING IN THE TXT FILE
-                    compare_prompt = con_question if trained_pro else pro_question
-                else:
-                    # 1. Prepare prompting
-                    trained_prompt = [
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question}
-                    ]
-                    trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-                    compare_prompt_text = trained_prompt_text # ONLY USED FOR LOGGING IN THE TXT FILE
-                    compare_prompt = question
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
@@ -126,6 +146,11 @@ def eval_on_test_set(
                 temperature=args.temperature
             )
 
+            input_prompt = {
+                'question': question,
+                'pro_position': possible_positions['PRO'] if eval_class.contrastive else None,
+                'con_position': possible_positions['CON'] if eval_class.contrastive else None,
+            }
             if args.dataset_name.lower() == "gsm8k":
                 # When computing rewards, pass the gold answer
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
@@ -140,7 +165,7 @@ def eval_on_test_set(
             else:
                 # Score completions to get reward metrics
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                    input_prompt=question, 
+                    input_prompt=input_prompt, 
                     all_models=all_models, 
                     train_model_completions=trained_completions_text, 
                     compare_model_completions=compare_completions_text,
@@ -205,9 +230,15 @@ def eval_on_test_set(
                 f.write("-"*40 + "\n")
 
             win_rate_per_question[num_question - 1] = reward_metrics['win_rate']
+            truth_rate_per_question[num_question - 1] = reward_metrics['truth_rate']
+            truth_rate_per_question_defending_truth[num_question - 1] = reward_metrics['truth_rate_defending_truth']
+            truth_rate_per_question_defending_false[num_question - 1] = reward_metrics['truth_rate_defending_false']
             # Log summary metrics for this question
             f.write("\nSUMMARY METRICS:\n")
             f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
+            f.write(f"Truth rate: {reward_metrics['truth_rate']:.2%}\n")
+            f.write(f"Truth rate defending truth: {reward_metrics['truth_rate_defending_truth']:.2%}\n")
+            f.write(f"Truth rate defending false: {reward_metrics['truth_rate_defending_false']:.2%}\n")
             f.write(f"Number of wins: {reward_metrics['num_wins']}\n")
             f.write(f"Total comparisons: {reward_metrics.get('num_comparisons', reward_metrics.get('num_debates', 0))}\n")
             f.write(f"Average format scores:\n")
@@ -227,6 +258,9 @@ def eval_on_test_set(
         # Save metrics
         metrics = {
             'win_rate': win_rate,
+            'truth_rate': truth_rate_per_question.mean().item()* 100,
+            'truth_rate_defending_truth': truth_rate_per_question_defending_truth.mean().item()* 100,
+            'truth_rate_defending_false': truth_rate_per_question_defending_false.mean().item()* 100,
             'total_wins': total_wins,
             'total_comparisons': total_comparisons,
             'num_question': num_question,
@@ -380,10 +414,16 @@ def score_completions(
         'generations': []
     }
 
+    input_prompt = {
+        'question': question,
+        'pro_position': 'PRO',
+        'con_position': 'CON',
+    }
+
     # Format inputs as expected by evaluator
     # Get rewards and metrics from evaluator
     rewards_per_func, metrics = eval_class.compute_rewards(
-        input_prompt=question,
+        input_prompt=input_prompt,
         all_models=all_models, 
         train_model_completions=completions_text, 
         compare_model_completions=None,
@@ -426,7 +466,7 @@ def score_completions(
 def score_contrastive_completions(
     pro_completions_text: list[str],
     con_completions_text: list[str],
-    question: str,
+    input_prompt: str,
     eval_class: evaluator.RewardEvaluator,
     device: str,
     args: argparse.Namespace
@@ -436,7 +476,7 @@ def score_contrastive_completions(
     
     Args:
         completions_text: List of generated completion strings
-        question: Original input question/prompt
+        input_prompt: Original input question/prompt
         answer: Ground truth answer
         eval_class: Evaluator class for computing rewards
         device: Device to place tensors on
@@ -452,20 +492,22 @@ def score_contrastive_completions(
     # Build log data dictionary
     log_data = {
         'prompt': {
-            'text': question,
+            'text': input_prompt['question'],
         },
         'pro_generations': [],
         'con_generations': []
     }
 
+
+
     # Compute both scenarios and average debate scores
-    scenarios = [(pro_completions_text, con_completions_text, True, 'pro'), 
-                 (con_completions_text, pro_completions_text, False, 'con')]
+    scenarios = [(pro_completions_text, con_completions_text, True, 'pro_first'), 
+                 (con_completions_text, pro_completions_text, False, 'con_first')]
 
     rewards_data = {}
     for train_comps, comp_comps, pro_first, stance in scenarios:
         rewards_per_func, stance_metrics, cross_score = eval_class.compute_rewards(
-            input_prompt=question, all_models=all_models,
+            input_prompt=input_prompt, all_models=all_models,
             train_model_completions=train_comps, compare_model_completions=comp_comps,
             device=device, is_test=False, pro_first=pro_first
         )
@@ -474,11 +516,16 @@ def score_contrastive_completions(
         rewards_data[stance] = (rewards_per_func, stance_metrics, cross_score)
 
     # Average debate scores
-    pro_rewards_per_func, pro_metrics, _ = rewards_data['pro']
-    con_rewards_per_func, con_metrics, _ = rewards_data['con']
+    pro_rewards_per_func, pro_metrics, _ = rewards_data['pro_first']
+    con_rewards_per_func, con_metrics, _ = rewards_data['con_first']
 
-    pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + rewards_data['con'][2]) / 2
-    con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + rewards_data['pro'][2]) / 2
+    if args.dataset_name == "debate_code" and args.truth_optim:
+        pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + 1 - rewards_data['con_first'][2]) / 2
+        con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + 1 - rewards_data['pro_first'][2]) / 2
+    else:
+        pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + rewards_data['con_first'][2]) / 2
+        con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + rewards_data['pro_first'][2]) / 2
+
 
     # Final data
     data_map = {'pro': (pro_completions_text, pro_rewards_per_func), 
@@ -491,7 +538,8 @@ def score_contrastive_completions(
             'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
         } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
 
-    metrics = {**pro_metrics, **con_metrics}
+    truth_metrics={'train/truth_win_rate': pro_rewards_per_func[:, 0].mean().item()/1.5}
+    metrics = {**pro_metrics, **con_metrics, **truth_metrics}
     pro_rewards, con_rewards = pro_rewards_per_func.sum(dim=1), con_rewards_per_func.sum(dim=1)
 
     return pro_rewards, con_rewards, pro_rewards_per_func, con_rewards_per_func, metrics, log_data
@@ -712,7 +760,7 @@ def grpo_loss(
 
 
     prompt = [
-        {'role': 'system', 'content': test_loader.pre_prompt},
+        {'role': 'system', 'content': train_loader.pre_prompt},
         {'role': 'user', 'content': question}
     ]
     prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
@@ -750,7 +798,9 @@ def grpo_contrastive_loss(
         device: str,
         round_num: int,
         training_log_dir: str, 
-        args: argparse.Namespace
+        args: argparse.Namespace,
+        choices: list[str],
+        correct_idx: int
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """
     Compute contrastive GRPO loss between PRO and CON stances.
@@ -769,6 +819,28 @@ def grpo_contrastive_loss(
         loss: The computed contrastive GRPO loss
         metrics: Dictionary containing training metrics
     """
+    if args.dataset_name == "debate_code":
+        possible_positions = {
+                'PRO': choices[correct_idx],  # PRO stance is defending the correct answer
+                'CON': random.choice([c for i, c in enumerate(choices) if i != correct_idx])  # CON stance is defending a random incorrect answer
+        }
+    elif args.dataset_name == "gsm8k":
+        if eval_class.contrastive:
+            possible_positions = {
+                'PRO': gold_answer,  # PRO stance is defending the gold answer
+                'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
+            }
+        else:
+            possible_positions = {
+                'PRO': None, 
+                'CON': None 
+            }
+    else:
+        possible_positions = {
+            'PRO': "PRO",  # Default PRO stance
+            'CON': "CON"   # Default CON stance
+        }
+
 
     pro_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
@@ -778,6 +850,37 @@ def grpo_contrastive_loss(
         {'role': 'system', 'content': train_loader.pre_prompt},
         {'role': 'user', 'content': question + "Position: CON"}
     ]
+    # if args.dataset_name == "debate_code":
+    #     # For debate_code, we use the choices and correct_idx to determine the PRO and CON prompts
+    #     pro_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
+    #     ]
+        
+    #     # Find all incorrect choices (all indices except the correct one)
+    #     incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
+    #     # Randomly sample one incorrect index
+    #     sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
+        
+    #     con_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
+    #     ]
+    # else:    
+    #     pro_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + "Position: PRO"}
+    #     ]
+    #     con_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + "Position: CON"}
+    #     ]
+
+    input_prompt = {
+        'question': question,
+        'pro_position': possible_positions['PRO'] if eval_class.contrastive else None,
+        'con_position': possible_positions['CON'] if eval_class.contrastive else None,
+    }
 
     prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(pro_prompt, tokenize=False)
     prompt_text_opponent  = all_models["training_model_tokenizer"].apply_chat_template(con_prompt, tokenize=False)
@@ -794,7 +897,7 @@ def grpo_contrastive_loss(
     
     # Score completions (cross-comparison between PRO and CON)
     pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data = score_contrastive_completions(
-        pro_completions_text, con_completions_text, question, eval_class, device, args
+        pro_completions_text, con_completions_text, input_prompt, eval_class, device, args
     )
 
     def compute_contrastive_advantages(
@@ -878,6 +981,19 @@ def grpo_contrastive_loss(
 
     # Combine metrics
     combined_metrics = {**metrics, **loss_metrics}
+    
+    # Log win rate for defending correct_idx in debate_code
+    if args.dataset_name == "debate_code":
+        # Track wins when defending the correct answer (PRO stance)
+        pro_wins = (pro_rewards > con_rewards).sum().item()
+        total_comparisons = len(pro_rewards)
+        correct_defense_win_rate = pro_wins / total_comparisons if total_comparisons > 0 else 0
+        
+        combined_metrics["debate_code/correct_defense_win_rate"] = correct_defense_win_rate
+        combined_metrics["debate_code/correct_defense_wins"] = pro_wins
+        combined_metrics["debate_code/total_comparisons"] = total_comparisons
+        
+        print(f"Code Debate - Correct Defense Win Rate: {correct_defense_win_rate:.2%} ({pro_wins}/{total_comparisons})")
 
     return loss, combined_metrics
 
@@ -889,8 +1005,9 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
-    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
+    parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate_code", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
+    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate_code", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
+    # add objective_functionality
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -931,6 +1048,8 @@ def parse_args():
     # add objective_functionality
     parser.add_argument("--contrastive_training", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive training (PRO vs CON)")
     parser.add_argument("--contrastive_eval", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive evaluation (PRO vs CON)")
+    parser.add_argument("--truth_optim", action="store_true", help="Use truth optimization for debate_code")
+    parser.add_argument("--truth_comparison", action="store_true", help="Use truth comparison in the judge prompt")
 
 
     args = parser.parse_args()
@@ -955,6 +1074,10 @@ if __name__ == "__main__":
     else: # same as: elif args.contrastive_training and args.contrastive_eval:
         print("This will train using PRO vs CON cross-comparison and eval on PRO vs CON cross-comparison as described in Multi-Prompt GRPO")
 
+
+    # Check if that only valid combination of args is used
+    if args.dataset_name == "debate_code" and ((not args.contrastive_training) or not (args.contrastive_eval)):
+        raise ValueError("For code_debate dataset, you must use --use_contrastive and --eval_type pc (position comparison)")
     
     # Setup logging
     os.makedirs(args.output_dir, exist_ok=True)
@@ -988,7 +1111,7 @@ if __name__ == "__main__":
                 print("✓ API key loaded successfully")
                 
                 # Initialize wandb
-                run_name = f"{args.model_name.split('/')[-1]}_{args.dataset_name}_{args.evaluator}"
+                run_name = f"{args.model_name.split('/')[-1]}_{args.truth_optim}"
                 print(f"Initializing wandb project: {args.wandb_project}")
                 print(f"Run name: {run_name}")
                 
@@ -1033,6 +1156,7 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high') 
 
     ## Set which model to train 
+    # TODO: put all the model the same
     if args.enable_detailed_logging:
         logger.info(f"Loading training model: {args.model_name}")
     model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)
@@ -1072,8 +1196,8 @@ if __name__ == "__main__":
     ## Set which evaluation criteria to use 
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
-    train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training)
-    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval)
+    train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training, truth_comparison=args.truth_comparison)
+    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval, truth_comparison=args.truth_comparison)
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
@@ -1183,7 +1307,10 @@ if __name__ == "__main__":
                     "eval/num_question": eval_metrics.get("num_question", 0),
                     "eval/trained_spoke_first": eval_metrics.get("trained_spoke_first", 0),
                     "eval/trained_defended_pro": eval_metrics.get("trained_defended_pro", 0),
-                    "step": round_num
+                    "eval/truth_rate": eval_metrics.get("truth_rate", 0),
+                    "eval/truth_rate_defending_truth": eval_metrics.get("truth_rate_defending_truth", 0),
+                    "eval/truth_rate_defending_false": eval_metrics.get("truth_rate_defending_false", 0),
+                    "step": round_num,
                 }
                 
                 # Add average scores
@@ -1225,7 +1352,13 @@ if __name__ == "__main__":
                 logger.info(f"Reference model updated at round {round_num} with alpha={args.ref_model_mixup_alpha}")
 
         # Get next question
-        question = next(train_loader)
+        
+        if args.dataset_name == "debate_code":
+            question, choices, correct_idx = next(train_loader)
+        else:
+            question = next(train_loader)
+            choices = ['PRO', 'CON'] # not used anyways
+            correct_idx = 0 # not used anyways
 
         # Clear cache before GRPO
         torch.cuda.empty_cache()
@@ -1237,7 +1370,7 @@ if __name__ == "__main__":
         # Do GRPO - generate chains, score, compute advantage, compute loss 
         if args.contrastive_training:
             total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, train_eval_class, 
-                                                            device, round_num, train_log_dir, args)
+                                                            device, round_num, train_log_dir, args, choices, correct_idx)
         else:
             total_loss, train_metrics = grpo_loss(train_loader, all_models, question, train_eval_class, 
                                                 device, round_num, train_log_dir, args)
@@ -1295,6 +1428,9 @@ if __name__ == "__main__":
                 "train/con_kl": train_metrics.get("con_kl", 0),
                 "train/step_loss": total_loss.item(),
                 "train/round_num": round_num,
+                "train/truth_rate": train_metrics.get("truth_rate", 0),
+                "train/truth_rate_defending_truth": train_metrics.get("truth_rate_defending_truth", 0),
+                "train/truth_rate_defending_false": train_metrics.get("truth_rate_defending_false", 0),
                 "step": round_num
             }
             
