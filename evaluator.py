@@ -387,8 +387,8 @@ class DebateEvaluator(RewardEvaluator):
         wins_second = wins.sum(dim=0)  # Wins for CON model
         first_win_rate = wins_first / total_matches
         second_win_rate = wins_second / total_matches
-        first_debate_scores = first_win_rate * 1.5  # Scale to desired range
-        second_debate_scores = second_win_rate * 1.5  # Scale to desired range
+        first_debate_scores = first_win_rate #* 1.5  # Scale to desired range
+        second_debate_scores = second_win_rate #* 1.5  # Scale to desired range
 
         # Clean role prefixes that chat template might have added
         cleaned_completions = []

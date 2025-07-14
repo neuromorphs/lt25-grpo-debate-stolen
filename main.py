@@ -720,11 +720,16 @@ def score_contrastive_completions(
     con_rewards_per_func, con_metrics, _ = rewards_data['con_first']
 
     if args.dataset_name == "debate_code" and args.truth_optim:
-        pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + 1 - rewards_data['con_first'][2]) / 2
-        con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + 1 - rewards_data['pro_first'][2]) / 2
+        pro_win_rate = (pro_rewards_per_func[:, 0] + 1 - rewards_data['con_first'][2]) / 2
+        con_win_rate = (con_rewards_per_func[:, 0] + 1 - rewards_data['pro_first'][2]) / 2
     else:
-        pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + rewards_data['con_first'][2]) / 2
-        con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + rewards_data['pro_first'][2]) / 2
+        pro_win_rate = (pro_rewards_per_func[:, 0] + rewards_data['con_first'][2]) / 2
+        con_win_rate = (con_rewards_per_func[:, 0] + rewards_data['pro_first'][2]) / 2
+    
+    pro_rewards_per_func[:, 0] = (2 * pro_win_rate - 1) * 1.5 
+    con_rewards_per_func[:, 0] = (2 * con_win_rate - 1) * 1.5
+
+
 
 
     # Final data
