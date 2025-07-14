@@ -3,7 +3,7 @@
 
 echo "Testing contrastive GRPO training with judge evaluation..."
 
-CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
+CUDA_VISIBLE_DEVICES=3,2 uv run python main.py \
     --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --judge_model_name "Qwen/Qwen2.5-1.5B-Instruct" \
     --compare_model_name "Qwen/Qwen2.5-1.5B-Instruct" \
@@ -14,7 +14,7 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --eval_iterations 50 \
     --verbose \
     --save_steps 100 \
-    --num_chains 8 \
+    --num_chains 24 \
     --gradient_accumulation_steps 4 \
     --contrastive_training True \
     --contrastive_eval False \

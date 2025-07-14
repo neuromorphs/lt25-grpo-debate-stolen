@@ -183,7 +183,7 @@ def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
     ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = 1 # int(total_topics * 0.15)
+    test_size = 6 # int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
@@ -255,7 +255,7 @@ def build_debate_contrastive_dataloaders() -> Tuple[DebateDataLoader, DebateData
     ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = 1 #int(total_topics * 0.15)
+    test_size = 6 #int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
