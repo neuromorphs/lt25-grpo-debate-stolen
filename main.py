@@ -61,9 +61,6 @@ def eval_on_test_set(
 
             if args.dataset_name.lower() == "gsm8k":
                 question, gold_answer = question  # GSM8K returns tuple
-                if contrastive:
-                    position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
-                    question = question + f'Position: {position}'  # Append stance to question
                 # 1. Prepare prompting
                 trained_prompt = [
                     {'role': 'system', 'content': test_loader.pre_prompt},
@@ -84,12 +81,12 @@ def eval_on_test_set(
                         {'role': 'system', 'content': test_loader.pre_prompt},
                         {'role': 'user', 'content': pro_question if trained_pro else con_question}
                     ]
-#                     compare_prompt = [
-#                         {'role': 'system', 'content': test_loader.pre_prompt},
-#                         {'role': 'user', 'content': con_question if trained_pro else pro_question}
-#                     ]
+                    compare_prompt = [ # ONLY USED FOR LOGGING IN THE TXT FILE
+                        {'role': 'system', 'content': test_loader.pre_prompt},
+                        {'role': 'user', 'content': con_question if trained_pro else pro_question}
+                    ]
                     trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-#                     compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt, tokenize=False)
+                    compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt, tokenize=False) # ONLY USED FOR LOGGING IN THE TXT FILE
                     compare_prompt = con_question if trained_pro else pro_question
                 else:
                     # 1. Prepare prompting
@@ -98,7 +95,7 @@ def eval_on_test_set(
                         {'role': 'user', 'content': question}
                     ]
                     trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-#                    compare_prompt_text = trained_prompt_text
+                    compare_prompt_text = trained_prompt_text # ONLY USED FOR LOGGING IN THE TXT FILE
                     compare_prompt = question
 
             # Log Initial prompt 
@@ -110,7 +107,7 @@ def eval_on_test_set(
             f.write("Prompt:\n")
             if eval_class.contrastive:
                 f.write(f"PRO: {trained_prompt_text}\n")
-                f.write(f"CON: {compare_prompt_text}\n")
+                f.write(f"CON: {compare_prompt}\n")
             else:
                 f.write(f"{trained_prompt_text}\n")
 
@@ -118,55 +115,37 @@ def eval_on_test_set(
             _, _, _, _, trained_completions_text, _ = generate_completions(
                 all_models["training_model"], all_models["training_model_tokenizer"], trained_prompt_text, device, args
             )
-            # _, _, _, _, compare_completions_text, _ = generate_completions(
-            #     all_models["compare_model"], all_models["training_model_tokenizer"], compare_prompt_text, device, args
-            # )
 
-            if args.use_batch_generation and hasattr(all_models["compare_model"], 'generate_batch'):
-                # Use efficient batched generation for HuggingFace models (e.g., Qwen)
-                compare_completions_text = all_models["compare_model"].generate_batch(
-                    system_prompt=test_loader.pre_prompt,
-                    user_prompt=compare_prompt,
-                    num_completions=args.num_chains,
-                    max_new_tokens=args.max_completion_length,
-                    temperature=args.temperature
-                )
-            else:
-                # Fallback to sequential generation for API models or when batching is disabled
-                compare_completions_text = []
-                for _ in range(args.num_chains):
-                    completion = all_models["compare_model"].generate(
-                        system_prompt=test_loader.pre_prompt,
-                        user_prompt=question,
-                        max_new_tokens=args.max_completion_length,
-                        temperature=args.temperature
-                    )
-                    compare_completions_text.append(completion)
+
+            # Use efficient batched generation for HuggingFace models (e.g., Qwen)
+            compare_completions_text = all_models["compare_model"].generate_batch(
+                system_prompt=test_loader.pre_prompt,
+                user_prompt=compare_prompt,
+                num_completions=args.num_chains,
+                max_new_tokens=args.max_completion_length,
+                temperature=args.temperature
+            )
 
             if args.dataset_name.lower() == "gsm8k":
                 # When computing rewards, pass the gold answer
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                    input_prompt=question, 
+                    input_prompt=trained_prompt_text, 
                     all_models=all_models, 
-                    train_model_completions=completions_text, 
+                    train_model_completions=trained_completions_text, 
                     compare_model_completions=compare_completions_text,
                     device=device,
                     is_test=True,
                     gold_answer=gold_answer,  # Pass gold answer for GSM8K
-                    use_batched_eval=args.use_batch_judge,
-                    use_semi_batched_eval=args.use_semi_batch_judge
                 )
             else:
                 # Score completions to get reward metrics
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
                     input_prompt=question, 
                     all_models=all_models, 
-                    train_model_completions=completions_text, 
+                    train_model_completions=trained_completions_text, 
                     compare_model_completions=compare_completions_text,
                     device=device,
                     is_test=True,
-                    use_batched_eval=args.use_batch_judge,
-                    use_semi_batched_eval=args.use_semi_batch_judge,
                     train_first=trained_first,
                     train_pro=trained_pro if eval_class.contrastive else None
                 )
@@ -178,11 +157,13 @@ def eval_on_test_set(
 
             # For each completion pair, log the results
             for i, (completion, compare_completion) in enumerate(zip(trained_completions_text, compare_completions_text)):
+                f.write("-"*40 + "\n\n")
                 f.write(f"\nCompletion #{i+1}\n")
                 f.write("-"*40 + "\n\n")
 
                 # Log trained model's response
                 f.write("TRAINED MODEL RESPONSE:\n")
+                f.write("-"*40 + "\n\n")
                 f.write(f"Full response:\n{completion}\n\n")
                 
                 try:
@@ -197,6 +178,7 @@ def eval_on_test_set(
 
                 # Log compare model's response
                 f.write("COMPARE MODEL RESPONSE:\n")
+                f.write("-"*40 + "\n\n")
                 f.write(f"Full response:\n{compare_completion}\n\n")
                 
                 try:
@@ -211,6 +193,7 @@ def eval_on_test_set(
 
                 # Log reward scores for this completion
                 f.write("REWARD SCORES:\n")
+                f.write("-"*40 + "\n\n")
                 reward_breakdown = eval_class.get_reward_breakdown(rewards_per_func[i])
                 for reward_name, reward_value in reward_breakdown.items():
                     f.write(f"{reward_name}: {reward_value:.4f}\n")
@@ -406,8 +389,6 @@ def score_completions(
         compare_model_completions=None,
         device=device, 
         is_test=False,
-        use_batched_eval=args.use_batch_judge,
-        use_semi_batched_eval=args.use_semi_batch_judge
     )
     rewards = rewards_per_func.sum(dim=1)
 
@@ -477,63 +458,43 @@ def score_contrastive_completions(
         'con_generations': []
     }
 
-    # Format inputs as expected by evaluator
-    # Get rewards and metrics from evaluator
-    pro_first_rewards_per_func, pro_first_metrics, con_second_debate_score = eval_class.compute_rewards(
-        input_prompt=question,
-        all_models=all_models, 
-        train_model_completions=pro_completions_text,
-        compare_model_completions=con_completions_text, 
-        device=device, 
-        is_test=False,
-        use_batched_eval=args.use_batch_judge,
-        use_semi_batched_eval=args.use_semi_batch_judge,
-        pro_first=True,
-    )
-    con_first_rewards_per_func, con_first_metrics, first_second_debate_score = eval_class.compute_rewards(
-        input_prompt=question,
-        all_models=all_models, 
-        train_model_completions=con_completions_text, # TODO: the argument name from the function is confusing
-        compare_model_completions=pro_completions_text, # TODO: the argument name from the function is confusing
-        device=device, 
-        is_test=False,
-        use_batched_eval=args.use_batch_judge,
-        use_semi_batched_eval=args.use_semi_batch_judge,
-        pro_first=False,
-    )
-    pro_first_rewards_per_func[:, 0] += first_second_debate_score
-    pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
-    con_first_rewards_per_func[:, 0] += con_second_debate_score
-    con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
-    pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
-    con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+    # Compute both scenarios and average debate scores
+    scenarios = [(pro_completions_text, con_completions_text, True, 'pro'), 
+                 (con_completions_text, pro_completions_text, False, 'con')]
 
-    # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
-    # Store generation data
-    for i, (completion, reward_scores) in enumerate(zip(pro_completions_text, pro_first_rewards_per_func)):
-        # print(completion)
-        generation_data = {
-            'response': completion,
-            'scores': {
-                **eval_class.get_reward_breakdown(reward_scores), # TODO: why do we sum before to then breakdown?
-                'total_reward': pro_rewards[i].item()
-            }
-        }
-        log_data['pro_generations'].append(generation_data)
-    for i, (completion, reward_scores) in enumerate(zip(con_completions_text, con_first_rewards_per_func)):
-        # print(completion)
-        generation_data = {
-            'response': completion,
-            'scores': {
-                **eval_class.get_reward_breakdown(reward_scores),
-                'total_reward': con_rewards[i].item()
-            }
-        }
-        log_data['con_generations'].append(generation_data)
-    
-    metrics = {**pro_first_metrics, **con_first_metrics}
+    rewards_data = {}
+    for train_comps, comp_comps, pro_first, stance in scenarios:
+        rewards_per_func, stance_metrics, cross_score = eval_class.compute_rewards(
+            input_prompt=question, all_models=all_models,
+            train_model_completions=train_comps, compare_model_completions=comp_comps,
+            device=device, is_test=False, pro_first=pro_first
+        )
+        
+        # Store for cross-averaging
+        rewards_data[stance] = (rewards_per_func, stance_metrics, cross_score)
 
-    return pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data
+    # Average debate scores
+    pro_rewards_per_func, pro_metrics, _ = rewards_data['pro']
+    con_rewards_per_func, con_metrics, _ = rewards_data['con']
+
+    pro_rewards_per_func[:, 0] = (pro_rewards_per_func[:, 0] + rewards_data['con'][2]) / 2
+    con_rewards_per_func[:, 0] = (con_rewards_per_func[:, 0] + rewards_data['pro'][2]) / 2
+
+    # Final data
+    data_map = {'pro': (pro_completions_text, pro_rewards_per_func), 
+                'con': (con_completions_text, con_rewards_per_func)}
+
+    for stance, (completions, rewards_per_func) in data_map.items():
+        rewards = rewards_per_func.sum(dim=1)
+        log_data[f'{stance}_generations'] = [{
+            'response': comp,
+            'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
+        } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
+
+    metrics = {**pro_metrics, **con_metrics}
+    pro_rewards, con_rewards = pro_rewards_per_func.sum(dim=1), con_rewards_per_func.sum(dim=1)
+
+    return pro_rewards, con_rewards, pro_rewards_per_func, con_rewards_per_func, metrics, log_data
 
 
 def compute_loss(
@@ -930,8 +891,6 @@ def parse_args():
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
     parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
     parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
-    # add objective_functionality
-    parser.add_argument("--eval_type", type=str, default="pp", choices=["pp, pc"], help="Objective functionality to use for scoring")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -962,7 +921,6 @@ def parse_args():
     parser.add_argument("--num_chains", type=int, default=16, help="Number of parallel generation chains")
     parser.add_argument("--max_prompt_length", type=int, default=256, help="Maximum prompt length")
     parser.add_argument("--max_completion_length", type=int, default=786, help="Maximum completion length")
-    parser.add_argument("--use_batch_generation", action="store_true", help="Use batched generation for compare model (more efficient for HuggingFace models)")
     parser.add_argument("--use_batch_judge", action="store_true", help="Use batched evaluation for judge model (much faster for HuggingFace judge models)")
     parser.add_argument("--use_semi_batch_judge", action="store_true", help="Use semi-batched evaluation for judge model (batch inner loop only, reduces memory usage)")
 
@@ -970,15 +928,33 @@ def parse_args():
     parser.add_argument("--num_train_iters", type=int, default=1000, help="Number of training iterations")
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
-    parser.add_argument("--use_contrastive", action="store_true", help="Use contrastive GRPO training (PRO vs CON)")
+    # add objective_functionality
+    parser.add_argument("--contrastive_training", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive training (PRO vs CON)")
+    parser.add_argument("--contrastive_eval", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive evaluation (PRO vs CON)")
+
 
     args = parser.parse_args()
+    
+    # Convert string arguments to boolean
+    args.contrastive_training = args.contrastive_training.lower() == "true"
+    args.contrastive_eval = args.contrastive_eval.lower() == "true"
+    
     return args
 
 if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
+    print(args.contrastive_training, args.contrastive_eval)
+    if not args.contrastive_training and not args.contrastive_eval:
+        print("This will train using PRO vs PRO and eval on PRO vs PRO comparison as described in GRPO-README")
+    elif not args.contrastive_training and args.contrastive_eval:
+        print("This will train using PRO vs PRO and eval on PRO vs CON cross-comparison as described in Multi-Prompt GRPO")
+    elif args.contrastive_training and not args.contrastive_eval:
+        print("This will train using PRO vs CON cross-comparison and eval on PRO vs PRO comparison as described in Multi-Prompt GRPO")
+    else: # same as: elif args.contrastive_training and args.contrastive_eval:
+        print("This will train using PRO vs CON cross-comparison and eval on PRO vs CON cross-comparison as described in Multi-Prompt GRPO")
+
     
     # Setup logging
     os.makedirs(args.output_dir, exist_ok=True)
@@ -1072,7 +1048,7 @@ if __name__ == "__main__":
     
     if args.enable_detailed_logging:
         logger.info(f"Loading compare model: {args.compare_model_name}")
-    compare_model = llms.get_compare_model(args.compare_model_name, device)
+    compare_model = judge_model # llms.get_compare_model(args.compare_model_name, device)
     
     # Simplified all_models dictionary
     all_models = {
@@ -1089,15 +1065,15 @@ if __name__ == "__main__":
     ## Set which data set 
     if args.enable_detailed_logging:
         logger.info(f"Loading dataset: {args.dataset_name}")
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, args.use_contrastive,)
+    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, args.contrastive_training,)
     if args.enable_detailed_logging:
         logger.info(f"Dataset loaded successfully")
 
     ## Set which evaluation criteria to use 
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
-    train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.use_contrastive)
-    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=False if args.eval_type == "pp" else True)
+    train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training)
+    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval)
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
@@ -1259,7 +1235,7 @@ if __name__ == "__main__":
         #=======================================================================================================================
         print(question)
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        if args.use_contrastive:
+        if args.contrastive_training:
             total_loss, train_metrics = grpo_contrastive_loss(train_loader, all_models, question, train_eval_class, 
                                                             device, round_num, train_log_dir, args)
         else:

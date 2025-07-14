@@ -1,8 +1,7 @@
 #!/bin/bash
-# Test script for contrastive GRPO training with semi-batched judge evaluation
+# Test script for contrastive GRPO training with judge evaluation
 
-echo "Testing contrastive GRPO training with semi-batched judge evaluation..."
-echo "This will train using PRO vs CON cross-comparison as described in Multi-Prompt GRPO"
+echo "Testing contrastive GRPO training with judge evaluation..."
 
 CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --model_name "Qwen/Qwen2.5-1.5B-Instruct" \
@@ -11,15 +10,14 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --dataset_name "debate" \
     --evaluator "debate" \
     --output_dir "debate_contrastive_test" \
-    --num_train_iters 250 \
+    --num_train_iters 500 \
     --eval_iterations 25 \
     --verbose \
     --save_steps 100 \
-    --num_chains 8 \
+    --num_chains 4 \
     --gradient_accumulation_steps 4 \
-    --use_semi_batch_judge \
-    --use_batch_generation \
-    --use_contrastive \
+    --contrastive_training True \
+    --contrastive_eval False \
     --enable_detailed_logging \
     --enable_wandb \
     --wandb_project "grpo-debate-contrastive"
