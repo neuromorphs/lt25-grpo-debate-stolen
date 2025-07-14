@@ -24,6 +24,7 @@ except ImportError:
     WANDB_AVAILABLE = False
     print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
 
+
 def eval_on_test_set(
     all_models: dict,
     test_loader: rldatasets.DataLoader,
@@ -63,7 +64,7 @@ def eval_on_test_set(
             num_question += 1
             
             # Handle different dataset formats
-            if args.dataset_name.lower() == "code_debate":
+            if args.dataset_name.lower() == "debate_code":
                 question, choices, correct_idx = item
                 possible_positions = {
                     'PRO': choices[correct_idx],  # PRO stance is defending the correct answer
@@ -91,20 +92,27 @@ def eval_on_test_set(
             trained_first = random.choice([True, False])  # Randomly choose which models goes first
             trained_spoke_first += 1 if trained_first else 0
             if eval_class.contrastive:
-                position = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
+                trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
                 trained_defended_pro += 1 if trained_pro else 0
-                pro_question = question + (f' Position: {possible_positions["PRO"]}' if possible_positions!= None else '')
+                pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions!= None else '')
+                con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions!= None else '')
                 trained_prompt = [
                         {'role': 'system', 'content': test_loader.pre_prompt},
                         {'role': 'user', 'content': pro_question},
                 ]
                 trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
                 compare_prompt = con_question if trained_pro else pro_question
+                compare_prompt_text = [
+                    {'role': 'system', 'content': test_loader.pre_prompt},
+                    {'role': 'user', 'content': compare_prompt}
+                ]
             else:
-                    trained_prompt = [
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': question}
-                    ]
+                trained_prompt = [
+                    {'role': 'system', 'content': test_loader.pre_prompt},
+                    {'role': 'user', 'content': question}
+                ]
+                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
@@ -151,15 +159,15 @@ def eval_on_test_set(
 
             input_prompt = {
                 'question': question,
-                'pro_prompt': possible_positions['PRO'] if eval_class.contrastive else None,
-                'con_prompt': possible_positions['CON'] if eval_class.contrastive else None,
+                'pro_position': possible_positions['PRO'] if eval_class.contrastive else None,
+                'con_position': possible_positions['CON'] if eval_class.contrastive else None,
             }
             if args.dataset_name.lower() == "gsm8k":
                 # When computing rewards, pass the gold answer
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                    input_prompt=input_prompt, 
+                    input_prompt=question, 
                     all_models=all_models, 
-                    train_model_completions=completions_text, 
+                    train_model_completions=trained_completions_text, 
                     compare_model_completions=compare_completions_text,
                     device=device,
                     is_test=True,
@@ -170,9 +178,9 @@ def eval_on_test_set(
             else:
                 # Score completions to get reward metrics
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                    input_prompt=question, 
+                    input_prompt=input_prompt, 
                     all_models=all_models, 
-                    train_model_completions=completions_text, 
+                    train_model_completions=trained_completions_text, 
                     compare_model_completions=compare_completions_text,
                     device=device,
                     is_test=True,
@@ -832,35 +840,66 @@ def grpo_contrastive_loss(
         metrics: Dictionary containing training metrics
     """
     if args.dataset_name == "code_debate":
-        # For code_debate, we use the choices and correct_idx to determine the PRO and CON prompts
-        pro_prompt = [
-            {'role': 'system', 'content': train_loader.pre_prompt},
-            {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
-        ]
+        possible_positions = {
+                'PRO': choices[correct_idx],  # PRO stance is defending the correct answer
+                'CON': random.choice([c for i, c in enumerate(choices) if i != correct_idx])  # CON stance is defending a random incorrect answer
+        }
+    elif args.dataset_name == "gsm8k":
+        if eval_class.contrastive:
+            possible_positions = {
+                'PRO': gold_answer,  # PRO stance is defending the gold answer
+                'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
+            }
+        else:
+            possible_positions = {
+                'PRO': None, 
+                'CON': None 
+            }
+    else:
+        possible_positions = {
+            'PRO': "PRO",  # Default PRO stance
+            'CON': "CON"   # Default CON stance
+        }
+
+
+    pro_prompt = [
+        {'role': 'system', 'content': train_loader.pre_prompt},
+        {'role': 'user', 'content': question + "Position: PRO"}
+    ]
+    con_prompt = [
+        {'role': 'system', 'content': train_loader.pre_prompt},
+        {'role': 'user', 'content': question + "Position: CON"}
+    ]
+    # if args.dataset_name == "code_debate":
+    #     # For code_debate, we use the choices and correct_idx to determine the PRO and CON prompts
+    #     pro_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
+    #     ]
         
-        # Find all incorrect choices (all indices except the correct one)
-        incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
-        # Randomly sample one incorrect index
-        sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
+    #     # Find all incorrect choices (all indices except the correct one)
+    #     incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
+    #     # Randomly sample one incorrect index
+    #     sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
         
-        con_prompt = [
-            {'role': 'system', 'content': train_loader.pre_prompt},
-            {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
-        ]
-    else:    
-        pro_prompt = [
-            {'role': 'system', 'content': train_loader.pre_prompt},
-            {'role': 'user', 'content': question + "Position: PRO"}
-        ]
-        con_prompt = [
-            {'role': 'system', 'content': train_loader.pre_prompt},
-            {'role': 'user', 'content': question + "Position: CON"}
-        ]
-    
+    #     con_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
+    #     ]
+    # else:    
+    #     pro_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + "Position: PRO"}
+    #     ]
+    #     con_prompt = [
+    #         {'role': 'system', 'content': train_loader.pre_prompt},
+    #         {'role': 'user', 'content': question + "Position: CON"}
+    #     ]
+
     input_prompt = {
         'question': question,
-        'pro_prompt': pro_prompt[1]['content'],
-        'con_prompt': con_prompt[1]['content'],
+        'pro_position': possible_positions['PRO'] if eval_class.contrastive else None,
+        'con_position': possible_positions['CON'] if eval_class.contrastive else None,
     }
 
     prompt_text_candidate = all_models["training_model_tokenizer"].apply_chat_template(pro_prompt, tokenize=False)
@@ -987,9 +1026,9 @@ def parse_args():
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
     parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate_code","debate", "ld", "chopped", "gsm8k"], help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
+    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate_code", "debate", "ld", "chopped", "gsm8k"], help="Evaluator to use for scoring")
     # add objective_functionality
-    parser.add_argument("--eval_type", type=str, default="pp", choices=["pp, pc"], help="Objective functionality to use for scoring")
+    parser.add_argument("--eval_type", type=str, default="pp", choices=["pp","pc"], help="Objective functionality to use for scoring")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -1120,6 +1159,7 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision('high') 
 
     ## Set which model to train 
+    # TODO: put all the model the same
     if args.enable_detailed_logging:
         logger.info(f"Loading training model: {args.model_name}")
     model, tokenizer = llms.get_llm_tokenizer(args.model_name, device)

@@ -84,7 +84,7 @@ def get_evaluator(name: str, contrastive: bool = False) -> RewardEvaluator:
     n = name.lower()
     if n == "gsm8k":
         return GSM8KEvaluator()
-    elif n == ['debate', 'code_debate']:
+    elif n in ["debate", "debate_code"]:
         return DebateEvaluator(contrastive=contrastive)
     elif n == "ld":
         return LDEvaluator()
@@ -211,7 +211,7 @@ class DebateEvaluator(RewardEvaluator):
         # Get debate scores using round-robin tournament
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
             for j in range(i + 1, num_completions):
-                topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+                topic = input_prompt['question']
                 response1 = self._extract_xml_answer(train_model_completions[i])
                 response2 = self._extract_xml_answer(train_model_completions[j])
                 
@@ -302,8 +302,8 @@ class DebateEvaluator(RewardEvaluator):
         comparisons = []
         judge_prompts = []
         
-        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
-        
+        topic = input_prompt['question']
+
         for i in range(num_completions):
             for j in range(i + 1, num_completions):
                 response1 = self._extract_xml_answer(train_model_completions[i])
@@ -414,7 +414,7 @@ class DebateEvaluator(RewardEvaluator):
         wins = torch.zeros(num_completions, device=device)
         losses = torch.zeros(num_completions, device=device)
         
-        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -539,7 +539,7 @@ class DebateEvaluator(RewardEvaluator):
         # Track wins/losses for each completion
         wins = torch.zeros((num_completions, num_completions), device=device)
         
-        topic = input_prompt['question'].split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -552,17 +552,12 @@ class DebateEvaluator(RewardEvaluator):
                 response2 = self._extract_xml_answer(second_model_completions[j])
                 
                 if self.contrastive:
-                    answer_defended = {
-                        'pro_answer': input_prompt['pro_position'] + ':\n',
-                        'con_answer': input_prompt['con_position'] + ':\n'
-                    }
-
                     if pro_first:
-                        response1 = input_prompt['pro_position'] + ':\n' + response1
-                        response2 = input_prompt['con_position'] + ':\n' + response2
+                        response1 = 'defending the answer' + input_prompt['pro_position'] + ':\n' + response1
+                        response2 = 'defending the answer' + input_prompt['con_position'] + ':\n' + response2
                     else:
-                        response1 = input_prompt['con_position'] + ':\n' + response1
-                        response2 = input_prompt['pro_position'] + ':\n' + response2
+                        response1 = 'defending the answer' + input_prompt['con_position'] + ':\n' + response1
+                        response2 = 'defending the answer' + input_prompt['pro_position'] + ':\n' + response2
                 else:
                     response1 = ':\n' + response1
                     response2 = ':\n' + response2
@@ -694,7 +689,7 @@ class DebateEvaluator(RewardEvaluator):
             device=device
         )
 
-        topic = input_prompt['question'].split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
 
         for i in range(num_debates):
             # Get trained model's response 
@@ -710,14 +705,14 @@ class DebateEvaluator(RewardEvaluator):
                 # If contrastive, prepend PRO/CON based on position
                 # check that train_first is not None
                 if train_first: 
-                    arg1 = input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg1 = 'defending the answer' + input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
                     arg1 += trained_response
-                    arg2 = input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg2 = 'defending the answer' + input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
                     arg2 += compare_response
                 else:
-                    arg1 = input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg1 = 'defending the answer' + input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
                     arg1 += compare_response
-                    arg2 = input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg2 = 'defending the answer' + input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
                     arg2 += trained_response
             else:
                 if train_first is None:

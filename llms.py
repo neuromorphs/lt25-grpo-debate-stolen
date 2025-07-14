@@ -58,7 +58,7 @@ def get_judge_model(model_name: str, device: str) -> ModelInterface:
             return AnthropicModel(model_name)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
-        return HuggingFaceModel(model, tokenizer, device)
+        return HuggingFaceModel(model, tokenizer, device) # to transform into model
 
 def get_compare_model(model_name: str, device: str) -> ModelInterface:
     """

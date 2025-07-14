@@ -707,6 +707,7 @@ def get_dataloaders(dataset_name: str, contrastive: bool = False, max_train_samp
     Raises:
         ValueError: If dataset_name is not supported
     """
+    print(f"Loading dataset: {dataset_name} (contrastive={contrastive})")
     if dataset_name.lower() == "gsm8k":
         return build_gsm8k_dataloaders()
     if dataset_name.lower() == 'debate':
@@ -715,13 +716,13 @@ def get_dataloaders(dataset_name: str, contrastive: bool = False, max_train_samp
         return build_ld_dataloaders()
     elif dataset_name.lower() == 'chopped':
         return build_chopped_dataloaders()
-    elif dataset_name.lower() == 'codecomprehension':
+    elif dataset_name.lower() == 'debate_code':
         # Use default values if not specified
-        train_samples = max_train_samples if max_train_samples is not None else 1000
-        test_samples = max_test_samples if max_test_samples is not None else 200
+        train_samples = max_train_samples if max_train_samples is not None else 10
+        test_samples = max_test_samples if max_test_samples is not None else 5
         return build_codecomprehension_dataloaders(train_samples, test_samples)
     else:
-        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', 'chopped', 'gsm8k' and 'codecomprehension' are available.")
+        raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', 'chopped', 'gsm8k' and 'debate_code' are available.")
 
 class GSM8KDataLoader(DataLoader):
     """

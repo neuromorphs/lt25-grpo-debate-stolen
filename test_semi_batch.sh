@@ -1,5 +1,13 @@
 #!/bin/bash
-# Test script for semi-batched judge evaluation
+#SBATCH --gpus-per-node=a100:2 --mem=80G
+#SBATCH --time=02:59:00
+#SBATCH --cpus-per-task=1
+
+
+module load CUDA/12.4.0
+module load  GCC/10.2.0
+module load Python/3.13.1-GCCcore-14.2.0
+
 
 echo "Testing semi-batched judge evaluation..."
 
