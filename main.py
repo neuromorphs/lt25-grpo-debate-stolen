@@ -97,8 +97,8 @@ def eval_on_test_set(
             if eval_class.contrastive:
                 trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
                 trained_defended_pro += 1 if trained_pro else 0
-                pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
-                con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
+                pro_question = question + str(f'\nPosition you have to defend: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
+                con_question = question + str(f'\nPosition you have to defend: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
                 trained_prompt = [
                         {'role': 'system', 'content': test_loader.pre_prompt},
                         {'role': 'user', 'content': pro_question if trained_pro else con_question},
@@ -538,7 +538,9 @@ def score_contrastive_completions(
             'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
         } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
 
-    truth_metrics={'train/truth_win_rate': pro_rewards_per_func[:, 0].mean().item()/1.5}
+    truth_metrics={'train/truth_win_rate': pro_rewards_per_func[:, 0].mean().item()/1.5,
+                     'train/truth_rate_defending_truth': pro_rewards_per_func[:, 1].mean().item()/1.5,
+                     'train/truth_rate_defending_false': con_rewards_per_func[:, 1].mean().item()/1.5}
     metrics = {**pro_metrics, **con_metrics, **truth_metrics}
     pro_rewards, con_rewards = pro_rewards_per_func.sum(dim=1), con_rewards_per_func.sum(dim=1)
 
@@ -844,37 +846,13 @@ def grpo_contrastive_loss(
 
     pro_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: PRO"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {possible_positions['PRO'] if possible_positions['PRO']!= None else 'PRO'}"}
     ]
     con_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: CON"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {possible_positions['CON'] if possible_positions['CON']!= None else 'CON'}"}
     ]
-    # if args.dataset_name == "debate_code":
-    #     # For debate_code, we use the choices and correct_idx to determine the PRO and CON prompts
-    #     pro_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
-    #     ]
-        
-    #     # Find all incorrect choices (all indices except the correct one)
-    #     incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
-    #     # Randomly sample one incorrect index
-    #     sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
-        
-    #     con_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
-    #     ]
-    # else:    
-    #     pro_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + "Position: PRO"}
-    #     ]
-    #     con_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + "Position: CON"}
-    #     ]
+
 
     input_prompt = {
         'question': question,
@@ -1428,7 +1406,7 @@ if __name__ == "__main__":
                 "train/con_kl": train_metrics.get("con_kl", 0),
                 "train/step_loss": total_loss.item(),
                 "train/round_num": round_num,
-                "train/truth_rate": train_metrics.get("truth_rate", 0),
+                "train/truth_rate": train_metrics.get("train/truth_win_rate", 0),
                 "train/truth_rate_defending_truth": train_metrics.get("truth_rate_defending_truth", 0),
                 "train/truth_rate_defending_false": train_metrics.get("truth_rate_defending_false", 0),
                 "step": round_num
