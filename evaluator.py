@@ -553,11 +553,11 @@ class DebateEvaluator(RewardEvaluator):
                 
                 if self.contrastive:
                     if pro_first:
-                        response1 = 'defending the answer' + input_prompt['pro_position'] + ':\n' + response1
-                        response2 = 'defending the answer' + input_prompt['con_position'] + ':\n' + response2
+                        response1 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response1
+                        response2 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response2
                     else:
-                        response1 = 'defending the answer' + input_prompt['con_position'] + ':\n' + response1
-                        response2 = 'defending the answer' + input_prompt['pro_position'] + ':\n' + response2
+                        response1 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response1
+                        response2 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response2
                 else:
                     response1 = ':\n' + response1
                     response2 = ':\n' + response2
@@ -674,6 +674,13 @@ class DebateEvaluator(RewardEvaluator):
         # trained_spoke_first = torch.zeros(num_debates, device=device) # TODO: more granualar random choice
         rewards_per_func = torch.zeros(num_debates, self.num_reward_functions, device=device)
         wins = 0
+        wins_defending_truth = 0
+        wins_defending_false = 0
+        get_truth_defending_truth = 0
+        get_truth_defending_false = 0
+        score = 0.0
+        # total_defending_truth = 0
+        # total_defending_false = 0
         
         # Get format rewards
         strict_format = torch.tensor(
@@ -705,14 +712,18 @@ class DebateEvaluator(RewardEvaluator):
                 # If contrastive, prepend PRO/CON based on position
                 # check that train_first is not None
                 if train_first: 
-                    arg1 = 'defending the answer' + input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg1 = 'defending the answer ' 
+                    arg1 += input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
                     arg1 += trained_response
-                    arg2 = 'defending the answer' + input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg2 = 'defending the answer ' 
+                    arg2 += input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
                     arg2 += compare_response
                 else:
-                    arg1 = 'defending the answer' + input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
+                    arg1 = 'defending the answer ' 
+                    arg1 += input_prompt['con_position'] + ':\n' if train_pro else input_prompt['pro_position'] + ':\n'
                     arg1 += compare_response
-                    arg2 = 'defending the answer' + input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
+                    arg2 = 'defending the answer ' 
+                    arg2 += input_prompt['pro_position'] + ':\n' if train_pro else input_prompt['con_position'] + ':\n'
                     arg2 += trained_response
             else:
                 if train_first is None:
@@ -738,16 +749,26 @@ class DebateEvaluator(RewardEvaluator):
                 temperature=0.1
             ).strip().upper()
             
+            # persuasion metrics
+            trained_win = False
             if train_first:
                 if "ARGUMENT_1_WINS" in judge_response:
                     score = 1.0
                     rewards_per_func[i, 0] = score
                     wins += 1
+                    trained_win = True
             else:
                 if "ARGUMENT_2_WINS" in judge_response:
                     score = 1.0
                     rewards_per_func[i, 0] = score
                     wins += 1
+                    trained_win = True
+            # truth metrics
+            if trained_win and train_pro:
+                get_truth_defending_truth += 1
+            if not(trained_win) and not train_pro:
+                get_truth_defending_false += 1
+
 
             # Add format rewards
             rewards_per_func[i, 1] = strict_format[i]
@@ -758,6 +779,9 @@ class DebateEvaluator(RewardEvaluator):
         win_rate = wins / num_debates
         metrics = {
             "win_rate": win_rate,
+            "truth_rate": (get_truth_defending_truth + wins_defending_truth) / num_debates,
+            "truth_rate_defending_truth": get_truth_defending_truth / (num_debates/2),
+            "truth_rate_defending_false": get_truth_defending_false / (num_debates/2),
             "reward": rewards_per_func.mean().item(),
             "num_wins": wins,
             "num_debates": num_debates,

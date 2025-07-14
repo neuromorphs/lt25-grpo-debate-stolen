@@ -45,6 +45,9 @@ def eval_on_test_set(
     trained_spoke_first = 0  # Track which model spoke first
     trained_defended_pro = 0  # Track if trained model is PRO in contrastive setup
     win_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_truth = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_false = torch.zeros(len(test_loader), device=device)
     num_question = 0
     total_wins = 0
 
@@ -241,9 +244,15 @@ def eval_on_test_set(
                 f.write("-"*40 + "\n")
 
             win_rate_per_question[num_question - 1] = reward_metrics['win_rate']
+            truth_rate_per_question[num_question - 1] = reward_metrics['truth_rate']
+            truth_rate_per_question_defending_truth[num_question - 1] = reward_metrics['truth_rate_defending_truth']
+            truth_rate_per_question_defending_false[num_question - 1] = reward_metrics['truth_rate_defending_false']
             # Log summary metrics for this question
             f.write("\nSUMMARY METRICS:\n")
             f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
+            f.write(f"Truth rate: {reward_metrics['truth_rate']:.2%}\n")
+            f.write(f"Truth rate defending truth: {reward_metrics['truth_rate_defending_truth']:.2%}\n")
+            f.write(f"Truth rate defending false: {reward_metrics['truth_rate_defending_false']:.2%}\n")
             f.write(f"Number of wins: {reward_metrics['num_wins']}\n")
             f.write(f"Total comparisons: {reward_metrics.get('num_comparisons', reward_metrics.get('num_debates', 0))}\n")
             f.write(f"Average format scores:\n")
@@ -263,6 +272,9 @@ def eval_on_test_set(
         # Save metrics
         metrics = {
             'win_rate': win_rate,
+            'truth_rate': truth_rate_per_question.mean().item()* 100,
+            'truth_rate_defending_truth': truth_rate_per_question_defending_truth.mean().item()* 100,
+            'truth_rate_defending_false': truth_rate_per_question_defending_false.mean().item()* 100,
             'total_wins': total_wins,
             'total_comparisons': total_comparisons,
             'num_question': num_question,
@@ -520,15 +532,19 @@ def score_contrastive_completions(
         use_semi_batched_eval=args.use_semi_batch_judge,
         pro_first=False,
     )
+    truth_metrics = {}
     if args.dataset_name == "code_debate" and args.truth_optim:
         # lign/column average
         pro_first_rewards_per_func[:, 0] += first_second_debate_score
         pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models (positions)
-        con_first_rewards_per_func[:, 0] = 1- con_first_rewards_per_func[:, 0]
-        con_first_rewards_per_func[:, 0] += (1-con_second_debate_score)
+        con_first_rewards_per_func[:, 0] = 1 - con_first_rewards_per_func[:, 0]
+        con_first_rewards_per_func[:, 0] += (1 - con_second_debate_score)
         con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
+        # TODO: remove the sum here, it is not needed
         pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
         con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+
+        # truth_metrics['train/truth_win_rate'] =
     else: 
         pro_first_rewards_per_func[:, 0] += first_second_debate_score
         pro_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
@@ -536,6 +552,10 @@ def score_contrastive_completions(
         con_first_rewards_per_func[:, 0] /= 2 # Average the debate score between the two models
         pro_rewards = pro_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
         con_rewards = con_first_rewards_per_func.sum(dim=1) # shape: (num_completions,)
+
+    truth_metrics['train/truth_win_rate'] = pro_rewards.mean().item()/1.5 # This is the win rate of the PRO model, which is the one defending the correct answer
+
+    
 
     # NEEDS TO BE MOVED BECAUSE THE REWARD IS OUT OF THE LOOP
     # Store generation data
@@ -560,7 +580,7 @@ def score_contrastive_completions(
         }
         log_data['con_generations'].append(generation_data)
     
-    metrics = {**pro_first_metrics, **con_first_metrics}
+    metrics = {**pro_first_metrics, **con_first_metrics, **truth_metrics}
 
     return pro_rewards, con_rewards, pro_first_rewards_per_func, con_first_rewards_per_func, metrics, log_data
 
@@ -1114,7 +1134,7 @@ if __name__ == "__main__":
                 print("✓ API key loaded successfully")
                 
                 # Initialize wandb
-                run_name = f"{args.model_name.split('/')[-1]}_{args.dataset_name}_{args.evaluator}"
+                run_name = f"{args.model_name.split('/')[-1]}_{args.truth_optim}"
                 print(f"Initializing wandb project: {args.wandb_project}")
                 print(f"Run name: {run_name}")
                 
@@ -1310,7 +1330,10 @@ if __name__ == "__main__":
                     "eval/num_question": eval_metrics.get("num_question", 0),
                     "eval/trained_spoke_first": eval_metrics.get("trained_spoke_first", 0),
                     "eval/trained_defended_pro": eval_metrics.get("trained_defended_pro", 0),
-                    "step": round_num
+                    "eval/truth_rate": eval_metrics.get("truth_rate", 0),
+                    "eval/truth_rate_defending_truth": eval_metrics.get("truth_rate_defending_truth", 0),
+                    "eval/truth_rate_defending_false": eval_metrics.get("truth_rate_defending_falsity", 0),
+                    "step": round_num,
                 }
                 
                 # Add average scores
@@ -1426,6 +1449,9 @@ if __name__ == "__main__":
                 "train/con_kl": train_metrics.get("con_kl", 0),
                 "train/step_loss": total_loss.item(),
                 "train/round_num": round_num,
+                "train/truth_rate": train_metrics.get("truth_rate", 0),
+                "train/truth_rate_defending_truth": train_metrics.get("truth_rate_defending_truth", 0),
+                "train/truth_rate_defending_false": train_metrics.get("truth_rate_defending_false", 0),
                 "step": round_num
             }
             

@@ -719,7 +719,7 @@ def get_dataloaders(dataset_name: str, contrastive: bool = False, max_train_samp
     elif dataset_name.lower() == 'debate_code':
         # Use default values if not specified
         train_samples = max_train_samples if max_train_samples is not None else 10
-        test_samples = max_test_samples if max_test_samples is not None else 5
+        test_samples = max_test_samples if max_test_samples is not None else 2
         return build_codecomprehension_dataloaders(train_samples, test_samples)
     else:
         raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', 'chopped', 'gsm8k' and 'debate_code' are available.")
