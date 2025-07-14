@@ -19,6 +19,7 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --contrastive_training True \
     --contrastive_eval True \
     --truth_comparison \
+    --truth_optim \
     --enable_detailed_logging \
     --enable_wandb \
     --wandb_project "grpo-debate-contrastive"

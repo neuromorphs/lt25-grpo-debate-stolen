@@ -11,10 +11,10 @@ CUDA_VISIBLE_DEVICES=2,3 uv run python main.py \
     --evaluator "debate" \
     --output_dir "debate_contrastive_test" \
     --num_train_iters 500 \
-    --eval_iterations 25 \
+    --eval_iterations 50 \
     --verbose \
     --save_steps 100 \
-    --num_chains 4 \
+    --num_chains 8 \
     --gradient_accumulation_steps 4 \
     --contrastive_training True \
     --contrastive_eval False \
