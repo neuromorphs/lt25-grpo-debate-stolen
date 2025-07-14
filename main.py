@@ -1402,8 +1402,7 @@ if __name__ == "__main__":
     train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training, truth_comparison=args.truth_comparison)
     contrastive_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval, truth_comparison=args.truth_comparison)
     if args.dataset_name == "debate":
-        # For debate dataset, we use the training evaluator to do the second evaluation on PP
-        pp_eval_class = train_eval_class
+        pp_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=False, truth_comparison=args.truth_comparison)
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
