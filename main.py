@@ -11,6 +11,8 @@ from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 from model_interface import ModelInterface
 import random
+import os 
+from datetime import datetime
 
 import llms
 import utils
@@ -25,7 +27,8 @@ except ImportError:
     print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
 
 
-def eval_on_test_set(
+
+def eval_on_test_contrastive(
     all_models: dict,
     test_loader: rldatasets.DataLoader,
     eval_class: evaluator.RewardEvaluator,
@@ -51,7 +54,7 @@ def eval_on_test_set(
     num_question = 0
     total_wins = 0
 
-    log_file = os.path.join(args.output_dir, f'eval_metrics_{round_num}.txt')
+    log_file = os.path.join(args.output_dir, f'eval_metrics_contrastive_{round_num}.txt')
     test_loader.reset()
     
     with open(log_file, 'w') as f:
@@ -76,16 +79,10 @@ def eval_on_test_set(
                 gold_answer = choices[correct_idx]  # Gold answer is the correct choice
             elif args.dataset_name.lower() == "gsm8k":
                 question, gold_answer = item  
-                if eval_class.contrastive:
-                    possible_positions = {
-                        'PRO': gold_answer,  # PRO stance is defending the gold answer
-                        'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
-                    }
-                else:
-                    possible_positions = {
-                        'PRO': None, 
-                        'CON': None 
-                    }
+                possible_positions = {
+                    'PRO': gold_answer,  # PRO stance is defending the gold answer
+                    'CON': random.choice(test_loader.get_incorrect_answers(gold_answer))  # CON stance is defending a random incorrect answer
+                }
             else:
                 question = item
                 possible_positions = {
@@ -94,29 +91,21 @@ def eval_on_test_set(
                 }
             trained_first = random.choice([True, False])  # Randomly choose which models goes first
             trained_spoke_first += 1 if trained_first else 0
-            if eval_class.contrastive:
-                trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
-                trained_defended_pro += 1 if trained_pro else 0
-                pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
-                con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
-                trained_prompt = [
-                        {'role': 'system', 'content': test_loader.pre_prompt},
-                        {'role': 'user', 'content': pro_question if trained_pro else con_question},
-                ]
-                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-                compare_prompt = con_question if trained_pro else pro_question
-                compare_prompt_text = [
+            trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
+            trained_defended_pro += 1 if trained_pro else 0
+            pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
+            con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
+            trained_prompt = [
                     {'role': 'system', 'content': test_loader.pre_prompt},
-                    {'role': 'user', 'content': compare_prompt}
-                ]
-            else:
-                trained_prompt = [
-                    {'role': 'system', 'content': test_loader.pre_prompt},
-                    {'role': 'user', 'content': question}
-                ]
-                compare_prompt = question
-                trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
-
+                    {'role': 'user', 'content': pro_question if trained_pro else con_question},
+            ]
+            trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+            compare_prompt = con_question if trained_pro else pro_question
+            compare_prompt_text = [
+                {'role': 'system', 'content': test_loader.pre_prompt},
+                {'role': 'user', 'content': compare_prompt}
+            ]
+            compare_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(compare_prompt_text, tokenize=False)
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
@@ -125,17 +114,13 @@ def eval_on_test_set(
             f.write("Prompt judge:\n")
             
             f.write("Prompt:\n")
-            if eval_class.contrastive:
-                f.write(f"PRO: {trained_prompt_text}\n")
-                f.write(f"CON: {compare_prompt}\n")
-            else:
-                f.write(f"{trained_prompt_text}\n")
+            f.write(f"TRAINED: {trained_prompt_text}\n")
+            f.write(f"COMPARE: {compare_prompt_text}\n")
 
             # Generate completions from trained model
             _, _, _, _, trained_completions_text, _ = generate_completions(
                 all_models["training_model"], all_models["training_model_tokenizer"], trained_prompt_text, device, args
             )
-
 
             # Use efficient batched generation for HuggingFace models (e.g., Qwen)
             compare_completions_text = all_models["compare_model"].generate_batch(
@@ -167,8 +152,8 @@ def eval_on_test_set(
                 rewards_per_func, reward_metrics = eval_class.compute_rewards(
                     input_prompt=input_prompt, 
                     all_models=all_models, 
-                    train_model_completions=trained_completions_text, 
-                    compare_model_completions=compare_completions_text,
+                    train_model_completions=trained_completions_text, # PRO
+                    compare_model_completions=compare_completions_text, # CON
                     device=device,
                     is_test=True,
                     train_first=trained_first,
@@ -303,6 +288,221 @@ def eval_on_test_set(
         json.dump(metrics, f, indent=4)
 
     return metrics, win_rate
+
+
+def eval_on_test_pp(
+    all_models: dict,
+    test_loader: rldatasets.DataLoader,
+    eval_class: evaluator.RewardEvaluator,
+    device: str,
+    args: argparse.Namespace,
+    round_num: int,
+    # contrastive: bool = False
+) -> tuple[dict[str, float], float]:
+    """
+    Evaluate model performance on test set by comparing each model completion
+    against a base model completion and having them judged.
+    """
+    print("Running evaluation on test set...")
+    logger = logging.getLogger(__name__) if hasattr(args, 'enable_detailed_logging') and args.enable_detailed_logging else None
+    
+    total_scores = defaultdict(float)
+    trained_spoke_first = 0  # Track which model spoke first
+    trained_defended_pro = 0  # Track if trained model is PRO in contrastive setup
+    win_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_truth = torch.zeros(len(test_loader), device=device)
+    truth_rate_per_question_defending_false = torch.zeros(len(test_loader), device=device)
+    num_question = 0
+    total_wins = 0
+
+    log_file = os.path.join(args.output_dir, f'eval_metrics_pp_{round_num}.txt')
+    test_loader.reset()
+    
+    with open(log_file, 'w') as f:
+        total_comparisons = 0
+        total_wins = 0
+        
+        # # Code debate specific metrics
+        # if args.dataset_name == "debate_code":
+        #     correct_defense_wins = 0
+        #     correct_defense_comparisons = 0
+        
+        for item in tqdm(test_loader, desc="Evaluating on test set"):
+            num_question += 1
+            stance = random.choice(['PRO', 'CON'])  # Randomly choose stance for contrastive evaluation
+            
+            question = item
+            trained_first = random.choice([True, False])  # Randomly choose which models goes first
+            trained_spoke_first += 1 if trained_first else 0
+            trained_prompt = [
+                {'role': 'system', 'content': test_loader.pre_prompt},
+                {'role': 'user', 'content': question + str(f' Position: {stance}')}
+            ]
+            compare_prompt = question + str(f' Position: {stance}')
+            trained_prompt_text = all_models["training_model_tokenizer"].apply_chat_template(trained_prompt, tokenize=False)
+
+
+            # Log Initial prompt 
+            f.write("\n" + "="*80 + "\n")
+            f.write(f"Question #{num_question} - Trained spoke first: {trained_first}\n")
+            f.write("="*80 + "\n\n")
+            f.write("Prompt judge:\n")
+            
+            f.write("Prompt:\n")
+            f.write(f"{trained_prompt_text}\n")
+
+            # Generate completions from trained model
+            _, _, _, _, trained_completions_text, _ = generate_completions(
+                all_models["training_model"], all_models["training_model_tokenizer"], trained_prompt_text, device, args
+            )
+
+            # Use efficient batched generation for HuggingFace models (e.g., Qwen)
+            compare_completions_text = all_models["compare_model"].generate_batch(
+                system_prompt=test_loader.pre_prompt,
+                user_prompt=compare_prompt,
+                num_completions=args.num_chains,
+                max_new_tokens=args.max_completion_length,
+                temperature=args.temperature
+            )
+
+            input_prompt = {
+                'question': question,
+                'pro_position': None,
+                'con_position': None,
+            }
+
+            # Score completions to get reward metrics
+            rewards_per_func, reward_metrics = eval_class.compute_rewards(
+                input_prompt=input_prompt, 
+                all_models=all_models, 
+                train_model_completions=trained_completions_text, # PRO
+                compare_model_completions=compare_completions_text, # CON
+                device=device,
+                is_test=True,
+                train_first=trained_first,
+                train_pro=None
+            )
+            # Track total comparisons and wins
+            comparisons_this_question = len(trained_completions_text)
+            total_comparisons += comparisons_this_question
+            total_wins += reward_metrics['num_wins']
+
+            # For each completion pair, log the results
+            for i, (completion, compare_completion) in enumerate(zip(trained_completions_text, compare_completions_text)):
+                f.write("-"*40 + "\n\n")
+                f.write(f"\nCompletion #{i+1}\n")
+                f.write("-"*40 + "\n\n")
+
+                # Log trained model's response
+                f.write("TRAINED MODEL RESPONSE:\n")
+                f.write("-"*40 + "\n\n")
+                f.write(f"Full response:\n{completion}\n\n")
+                
+                try:
+                    trained_reasoning = completion.split("<reasoning>\n")[1].split("\n</reasoning>")[0]
+                    trained_answer = completion.split("<answer>\n")[1].split("\n</answer>")[0]
+                except:
+                    trained_reasoning = "ERROR: Could not parse reasoning"
+                    trained_answer = "ERROR: Could not parse answer"
+                
+                f.write(f"Parsed reasoning:\n{trained_reasoning}\n")
+                f.write(f"Parsed answer:\n{trained_answer}\n\n")
+
+                # Log compare model's response
+                f.write("COMPARE MODEL RESPONSE:\n")
+                f.write("-"*40 + "\n\n")
+                f.write(f"Full response:\n{compare_completion}\n\n")
+                
+                try:
+                    compare_reasoning = compare_completion.split("<reasoning>\n")[1].split("\n</reasoning>")[0]
+                    compare_answer = compare_completion.split("<answer>\n")[1].split("\n</answer>")[0]
+                except:
+                    compare_reasoning = "ERROR: Could not parse reasoning"
+                    compare_answer = "ERROR: Could not parse answer"
+                
+                f.write(f"Parsed reasoning:\n{compare_reasoning}\n")
+                f.write(f"Parsed answer:\n{compare_answer}\n\n")
+
+                # Log reward scores for this completion
+                f.write("REWARD SCORES:\n")
+                f.write("-"*40 + "\n\n")
+                reward_breakdown = eval_class.get_reward_breakdown(rewards_per_func[i])
+                for reward_name, reward_value in reward_breakdown.items():
+                    f.write(f"{reward_name}: {reward_value:.4f}\n")
+                f.write(f"Total reward: {rewards_per_func[i].sum().item():.4f}\n")
+
+                # Log if trained model won this comparison
+                trained_model_won = rewards_per_func[i,0] > 0
+                f.write(f"\nOUTCOME: Trained model {'won' if trained_model_won else 'lost'} this comparison\n")
+                f.write("-"*40 + "\n")
+
+            win_rate_per_question[num_question - 1] = reward_metrics['win_rate']
+            # Log summary metrics for this question
+            f.write("\nSUMMARY METRICS:\n")
+            f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
+            f.write(f"Number of wins: {reward_metrics['num_wins']}\n")
+            f.write(f"Total comparisons: {reward_metrics.get('num_comparisons', reward_metrics.get('num_debates', 0))}\n")
+            f.write(f"Average format scores:\n")
+            f.write(f"  Strict format: {reward_metrics['rewards/strict_format']:.4f}\n")
+            f.write(f"  Soft format: {reward_metrics['rewards/soft_format']:.4f}\n")
+            f.write(f"  XML count: {reward_metrics['rewards/xml_count']:.4f}\n")
+
+            # Update total scores
+            for k, v in reward_metrics.items():
+                if k.startswith('rewards/'):
+                    total_scores[k] += v
+        
+        # Calculate final metrics
+        win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
+        avg_scores = {k: v/num_question for k,v in total_scores.items()}
+
+        # Save metrics
+        metrics = {
+            'win_rate': win_rate,
+            'total_wins': total_wins,
+            'total_comparisons': total_comparisons,
+            'num_question': num_question,
+            'average_scores': avg_scores,
+            'trained_spoke_first': trained_spoke_first,
+            'trained_defended_pro': trained_defended_pro,
+            'win_rate_per_question': win_rate_per_question.tolist() if isinstance(win_rate_per_question, torch.Tensor) else win_rate_per_question,
+        }
+
+        # Write summary results to file and optionally print
+        f.write("\nFINAL EVALUATION RESULTS:\n")
+        f.write("-" * 20 + "\n")
+        f.write(f"Win Rate: {win_rate:.2f}%\n")
+        f.write(f"Total Wins: {total_wins}\n") 
+        f.write(f"Total Comparisons: {total_comparisons}\n")
+        f.write("\nAverage Scores:\n")
+        for metric, value in avg_scores.items():
+            f.write(f"{metric:15s}: {value:.4f}\n")
+        f.write("-" * 20 + "\n")
+
+        if args.verbose:
+            print("\nEvaluation Results:")
+            print("-" * 20)
+            print(f"Win Rate: {win_rate:.2f}%")
+            print(f"Total Wins: {total_wins}")
+            print(f"Total Comparisons: {total_comparisons}")
+            print("\nAverage Scores:")
+            for metric, value in avg_scores.items():
+                print(f"{metric:15s}: {value:.4f}")
+            print("-" * 20)
+            
+        # Also log to file
+        if logger:
+            logger.info(f"Test evaluation completed - Win Rate: {win_rate:.2f}%, Total Wins: {total_wins}, Total Comparisons: {total_comparisons}")
+            for metric, value in avg_scores.items():
+                logger.info(f"Test {metric}: {value:.4f}")
+
+    metrics_path = os.path.join(args.output_dir, f'eval_metrics_{round_num}.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(metrics, f, indent=4)
+
+    return metrics, win_rate
+
 
 def generate_completions(
     model: PreTrainedModel,
@@ -1080,6 +1280,9 @@ if __name__ == "__main__":
         raise ValueError("For code_debate dataset, you must use --use_contrastive and --eval_type pc (position comparison)")
     
     # Setup logging
+    # add the time to the output directory name
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    args.output_dir = os.path.join(args.output_dir, f"{args.dataset_name}_{timestamp}")
     os.makedirs(args.output_dir, exist_ok=True)
     if args.enable_detailed_logging:
         logging.basicConfig(
@@ -1197,7 +1400,10 @@ if __name__ == "__main__":
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
     train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training, truth_comparison=args.truth_comparison)
-    eval_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval, truth_comparison=args.truth_comparison)
+    contrastive_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval, truth_comparison=args.truth_comparison)
+    if args.dataset_name == "debate":
+        # For debate dataset, we use the training evaluator to do the second evaluation on PP
+        pp_eval_class = train_eval_class
     if args.enable_detailed_logging:
         logger.info(f"Evaluator loaded successfully")
 
@@ -1284,10 +1490,10 @@ if __name__ == "__main__":
         if round_num % args.eval_iterations == 0:
             if args.enable_detailed_logging:
                 logger.info(f"Starting evaluation at round {round_num}")
-            eval_metrics, eval_accuracy = eval_on_test_set(
+            contrastive_eval_metrics, contrastive_eval_accuracy = eval_on_test_contrastive(
                 all_models=all_models,
                 test_loader=test_loader,
-                eval_class=eval_eval_class,
+                eval_class=contrastive_eval_class,
                 device=device,
                 args=args,
                 round_num=round_num,
@@ -1295,26 +1501,50 @@ if __name__ == "__main__":
             )
             
             if args.enable_detailed_logging:
-                logger.info(f"Evaluation completed - Win rate: {eval_accuracy:.2f}%")
-                logger.info(f"Evaluation metrics: {eval_metrics}")
+                logger.info(f"Contrastive evaluation completed - Win rate: {contrastive_eval_accuracy:.2f}%")
+                logger.info(f"Contrastive evaluation metrics: {contrastive_eval_metrics}")
+
+            if args.dataset_name == "debate":
+                pp_eval_metrics, pp_eval_accuracy = eval_on_test_pp(
+                    all_models=all_models,
+                    test_loader=test_loader,
+                    eval_class=pp_eval_class,
+                    device=device,
+                    args=args,
+                    round_num=round_num,
+                )
+
+                if args.enable_detailed_logging:
+                    logger.info(f"PP evaluation completed - Win rate: {pp_eval_accuracy:.2f}%")
+                    logger.info(f"PP evaluation metrics: {pp_eval_metrics}")
+            
             
             # Log evaluation to wandb
             if args.enable_wandb:
                 eval_wandb_log = {
-                    "eval/win_rate": eval_accuracy,
-                    "eval/total_wins": eval_metrics.get("total_wins", 0),
-                    "eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
-                    "eval/num_question": eval_metrics.get("num_question", 0),
-                    "eval/trained_spoke_first": eval_metrics.get("trained_spoke_first", 0),
-                    "eval/trained_defended_pro": eval_metrics.get("trained_defended_pro", 0),
-                    "eval/truth_rate": eval_metrics.get("truth_rate", 0),
-                    "eval/truth_rate_defending_truth": eval_metrics.get("truth_rate_defending_truth", 0),
-                    "eval/truth_rate_defending_false": eval_metrics.get("truth_rate_defending_false", 0),
+                    "eval/win_rate": contrastive_eval_accuracy,
+                    "eval/total_wins": contrastive_eval_metrics.get("total_wins", 0),
+                    "eval/total_comparisons": contrastive_eval_metrics.get("total_comparisons", 0),
+                    "eval/num_question": contrastive_eval_metrics.get("num_question", 0),
+                    "eval/trained_spoke_first": contrastive_eval_metrics.get("trained_spoke_first", 0),
+                    "eval/trained_defended_pro": contrastive_eval_metrics.get("trained_defended_pro", 0),
+                    "eval/truth_rate": contrastive_eval_metrics.get("truth_rate", 0),
+                    "eval/truth_rate_defending_truth": contrastive_eval_metrics.get("truth_rate_defending_truth", 0),
+                    "eval/truth_rate_defending_false": contrastive_eval_metrics.get("truth_rate_defending_false", 0),
+                    "eval/win_rate_per_question": contrastive_eval_metrics.get("win_rate_per_question", 0),
                     "step": round_num,
                 }
+                if args.dataset_name == "debate":
+                    eval_wandb_log["eval/pp_win_rate"] = pp_eval_accuracy
+                    eval_wandb_log["eval/pp_total_wins"] = pp_eval_metrics.get("total_wins", 0)
+                    eval_wandb_log["eval/pp_total_comparisons"] = pp_eval_metrics.get("total_comparisons", 0)
+                    eval_wandb_log["eval/pp_num_question"] = pp_eval_metrics.get("num_question", 0)
+                    eval_wandb_log["eval/pp_trained_spoke_first"] = pp_eval_metrics.get("trained_spoke_first", 0)
+                    eval_wandb_log["eval/pp_trained_defended_pro"] = pp_eval_metrics.get("trained_defended_pro", 0)
+                    eval_wandb_log["eval/pp_win_rate_per_question"] = pp_eval_metrics.get("win_rate_per_question", 0)
                 
                 # Add average scores
-                avg_scores = eval_metrics.get("average_scores", {})
+                avg_scores = contrastive_eval_metrics.get("average_scores", {})
                 for key, value in avg_scores.items():
                     eval_wandb_log[f"eval/{key}"] = value
                 
@@ -1324,8 +1554,8 @@ if __name__ == "__main__":
             metrics_path = os.path.join(eval_log_dir, f'metrics_{round_num}.json')
             with open(metrics_path, 'w') as f:
                 json.dump({
-                    'metrics': eval_metrics,
-                    'accuracy': eval_accuracy
+                    'metrics': contrastive_eval_metrics,
+                    'accuracy': contrastive_eval_accuracy
                 }, f, indent=4)
             if args.enable_detailed_logging:
                 logger.info(f"Evaluation results saved to {metrics_path}")
