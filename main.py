@@ -1332,7 +1332,7 @@ if __name__ == "__main__":
                     "eval/trained_defended_pro": eval_metrics.get("trained_defended_pro", 0),
                     "eval/truth_rate": eval_metrics.get("truth_rate", 0),
                     "eval/truth_rate_defending_truth": eval_metrics.get("truth_rate_defending_truth", 0),
-                    "eval/truth_rate_defending_false": eval_metrics.get("truth_rate_defending_falsity", 0),
+                    "eval/truth_rate_defending_false": eval_metrics.get("truth_rate_defending_false", 0),
                     "step": round_num,
                 }
                 
