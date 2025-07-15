@@ -93,8 +93,8 @@ def eval_on_test_contrastive(
             trained_spoke_first += 1 if trained_first else 0
             trained_pro = random.choice([True, False])  # Randomly choose stance for contrastive evaluation
             trained_defended_pro += 1 if trained_pro else 0
-            pro_question = question + str(f' Position: {possible_positions["PRO"]}' if possible_positions['PRO']!= None else '')
-            con_question = question + str(f' Position: {possible_positions["CON"]}' if possible_positions['CON']!= None else '')
+            pro_question = question + str(f'\nPosition you have to defend: {possible_positions["PRO"]}')
+            con_question = question + str(f'\nPosition you have to defend: {possible_positions["CON"]}')
             trained_prompt = [
                     {'role': 'system', 'content': test_loader.pre_prompt},
                     {'role': 'user', 'content': pro_question if trained_pro else con_question},
@@ -705,7 +705,7 @@ def score_contrastive_completions(
                  (con_completions_text, pro_completions_text, False, 'con_first')]
 
     rewards_data = {}
-    for train_comps, comp_comps, pro_first, stance in scenarios:
+    for train_comps, comp_comps, pro_first, order in scenarios:
         rewards_per_func, stance_metrics, cross_score = eval_class.compute_rewards(
             input_prompt=input_prompt, all_models=all_models,
             train_model_completions=train_comps, compare_model_completions=comp_comps,
@@ -713,7 +713,7 @@ def score_contrastive_completions(
         )
         
         # Store for cross-averaging
-        rewards_data[stance] = (rewards_per_func, stance_metrics, cross_score)
+        rewards_data[order] = (rewards_per_func, stance_metrics, cross_score)
 
     # Average debate scores
     pro_rewards_per_func, pro_metrics, _ = rewards_data['pro_first']
@@ -743,7 +743,12 @@ def score_contrastive_completions(
             'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
         } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
 
-    truth_metrics={'train/truth_win_rate': pro_rewards_per_func[:, 0].mean().item()/1.5}
+    truth_metrics={'train/truth_win_rate': pro_rewards_per_func[:, 0].mean().item()/1.5,
+                     'train/truth_rate_defending_truth': pro_rewards_per_func[:, 1].mean().item()/1.5,
+                     'train/truth_rate_defending_false': con_rewards_per_func[:, 1].mean().item()/1.5}
+    # modify every key of pro_metrics with a pro_ prefix
+    pro_metrics = {f'pro_{k}': v for k, v in pro_metrics.items()}
+    con_metrics = {f'con_{k}': v for k, v in con_metrics.items()}
     metrics = {**pro_metrics, **con_metrics, **truth_metrics}
     pro_rewards, con_rewards = pro_rewards_per_func.sum(dim=1), con_rewards_per_func.sum(dim=1)
 
@@ -916,8 +921,8 @@ def compute_contrastive_loss(
     metrics["con_kl"] = con_mean_kl.item()
     
     # Combined metrics
-    metrics["total_response_length"] = (pro_response_length + con_response_length) / 2
-    metrics["total_kl"] = (pro_mean_kl + con_mean_kl).item() / 2
+    metrics["mean_response_length"] = (pro_response_length + con_response_length) / 2
+    metrics["mean_kl"] = (pro_mean_kl + con_mean_kl).item() / 2
     metrics["pro_loss"] = pro_loss.item()
     metrics["con_loss"] = con_loss.item()
     
@@ -1049,37 +1054,13 @@ def grpo_contrastive_loss(
 
     pro_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: PRO"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {possible_positions['PRO'] if possible_positions['PRO']!= None else 'PRO'}"}
     ]
     con_prompt = [
         {'role': 'system', 'content': train_loader.pre_prompt},
-        {'role': 'user', 'content': question + "Position: CON"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {possible_positions['CON'] if possible_positions['CON']!= None else 'CON'}"}
     ]
-    # if args.dataset_name == "debate_code":
-    #     # For debate_code, we use the choices and correct_idx to determine the PRO and CON prompts
-    #     pro_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + f"Position: {choices[correct_idx]}"}
-    #     ]
-        
-    #     # Find all incorrect choices (all indices except the correct one)
-    #     incorrect_indices = [i for i in range(len(choices)) if i != correct_idx]
-    #     # Randomly sample one incorrect index
-    #     sampled_incorrect_idx = incorrect_indices[torch.randint(0, len(incorrect_indices), (1,)).item()]
-        
-    #     con_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + f"Position: {choices[sampled_incorrect_idx]}"}
-    #     ]
-    # else:    
-    #     pro_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + "Position: PRO"}
-    #     ]
-    #     con_prompt = [
-    #         {'role': 'system', 'content': train_loader.pre_prompt},
-    #         {'role': 'user', 'content': question + "Position: CON"}
-    #     ]
+
 
     input_prompt = {
         'question': question,
@@ -1405,7 +1386,7 @@ if __name__ == "__main__":
     if args.enable_detailed_logging:
         logger.info(f"Loading evaluator: {args.evaluator}")
     train_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_training, truth_comparison=args.truth_comparison)
-    contrastive_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=args.contrastive_eval, truth_comparison=args.truth_comparison)
+    contrastive_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=True, truth_comparison=args.truth_comparison)
     if args.dataset_name == "debate":
         pp_eval_class = evaluator.get_evaluator(args.evaluator, contrastive=False, truth_comparison=args.truth_comparison)
     if args.enable_detailed_logging:
@@ -1650,27 +1631,40 @@ if __name__ == "__main__":
                 "train/learning_rate": train_metrics.get("learning_rate", 0),
                 "train/grad_norm": train_metrics.get("grad_norm", 0),
                 "train/kl": train_metrics.get("kl", 0),
-                "train/response_length": train_metrics.get("response_length", 0),
-                "train/reward_std": train_metrics.get("reward_std", 0),
-                "train/total_response_length": train_metrics.get("total_response_length", 0),
-                "train/total_kl": train_metrics.get("total_kl", 0),
+                "train/response_length": train_metrics.get("response_length", 0), # response length in non_contrastive training
+                "train/mean_response_length": train_metrics.get("mean_response_length", 0),
                 "train/pro_loss": train_metrics.get("pro_loss", 0),
                 "train/con_loss": train_metrics.get("con_loss", 0),
-                "train/pro_response_length": train_metrics.get("pro_response_length", 0),
-                "train/con_response_length": train_metrics.get("con_response_length", 0),
                 "train/pro_kl": train_metrics.get("pro_kl", 0),
                 "train/con_kl": train_metrics.get("con_kl", 0),
+                "train/mean_kl": train_metrics.get("mean_kl", 0),
+                "train/pro_response_length": train_metrics.get("pro_response_length", 0),
+                "train/con_response_length": train_metrics.get("con_response_length", 0),
                 "train/step_loss": total_loss.item(),
                 "train/round_num": round_num,
-                "train/truth_rate": train_metrics.get("truth_rate", 0),
-                "train/truth_rate_defending_truth": train_metrics.get("truth_rate_defending_truth", 0),
-                "train/truth_rate_defending_false": train_metrics.get("truth_rate_defending_false", 0),
+                "train/truth_rate": train_metrics.get("train/truth_win_rate", 0),
+                "train/truth_rate_defending_truth": train_metrics.get("train/truth_rate_defending_truth", 0),
+                "train/truth_rate_defending_false": train_metrics.get("train/truth_rate_defending_false", 0),
+                # Pro-specific reward metrics
+                "train/pro_rewards/first_win_rate": train_metrics.get("pro_rewards/first_win_rate", 0),
+                "train/pro_rewards/second_win_rate": train_metrics.get("con_rewards/second_win_rate", 0),
+                "train/pro_rewards/strict_format": train_metrics.get("pro_rewards/strict_format", 0),
+                "train/pro_rewards/soft_format": train_metrics.get("pro_rewards/soft_format", 0),
+                "train/pro_rewards/xml_count": train_metrics.get("pro_rewards/xml_count", 0),
+                "train/pro_reward": train_metrics.get("pro_reward", 0),
+                # Con-specific reward metrics
+                "train/con_rewards/first_win_rate": train_metrics.get("con_rewards/first_win_rate", 0),
+                "train/con_rewards/second_win_rate": train_metrics.get("pro_rewards/second_win_rate", 0),
+                "train/con_rewards/strict_format": train_metrics.get("con_rewards/strict_format", 0),
+                "train/con_rewards/soft_format": train_metrics.get("con_rewards/soft_format", 0),
+                "train/con_rewards/xml_count": train_metrics.get("con_rewards/xml_count", 0),
+                "train/con_reward": train_metrics.get("con_reward", 0),
                 "step": round_num
             }
             
-            # Add reward metrics if available
+            # Add reward metrics if available (including prefixed ones)
             for key, value in train_metrics.items():
-                if key.startswith('rewards/'):
+                if key.startswith('rewards/') or key.startswith('pro_rewards/') or key.startswith('con_rewards/'):
                     wandb_log[f"train/{key}"] = value
             
             wandb.log(wandb_log)

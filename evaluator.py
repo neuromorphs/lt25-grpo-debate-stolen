@@ -384,11 +384,11 @@ class DebateEvaluator(RewardEvaluator):
         # Calculate normalized scores (-1.5 to 1.5 range)
         total_matches = num_completions  # number of matches per completion
         wins_first = wins.sum(dim=1)  # Wins for PRO model
-        wins_second = wins.sum(dim=0)  # Wins for CON model
+        wins_second = num_completions - wins.sum(dim=0)  # Wins for CON model
         first_win_rate = wins_first / total_matches
         second_win_rate = wins_second / total_matches
-        first_debate_scores = first_win_rate #* 1.5  # Scale to desired range
-        second_debate_scores = second_win_rate #* 1.5  # Scale to desired range
+        # first_debate_scores = first_win_rate #* 1.5  # Scale to desired range
+        # second_debate_scores = second_win_rate #* 1.5  # Scale to desired range
 
         # Clean role prefixes that chat template might have added
         cleaned_completions = []
@@ -422,20 +422,21 @@ class DebateEvaluator(RewardEvaluator):
 
         
         # Combine all rewards
-        rewards_per_func[:, 0] = first_debate_scores
+        rewards_per_func[:, 0] = first_win_rate
         rewards_per_func[:, 1] = strict_format
         rewards_per_func[:, 2] = soft_format
         rewards_per_func[:, 3] = xml_count
         
         metrics = {
-            "rewards/debate_score": first_debate_scores.mean().item(),
+            "rewards/first_win_rate": first_win_rate.mean().item(),
+            "rewards/second_win_rate": second_win_rate.mean().item(),
             "rewards/strict_format": strict_format.mean().item(),
             "rewards/soft_format": soft_format.mean().item(),
             "rewards/xml_count": xml_count.mean().item(),
             "reward": rewards_per_func.sum(dim=1).mean().item()
         }
         
-        return rewards_per_func, metrics, second_debate_scores
+        return rewards_per_func, metrics, second_win_rate
 
 
     def _compute_test_rewards(
