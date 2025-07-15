@@ -1236,6 +1236,7 @@ def parse_args():
     parser.add_argument("--contrastive_eval", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive evaluation (PRO vs CON)")
     parser.add_argument("--truth_optim", action="store_true", help="Use truth optimization for debate_code")
     parser.add_argument("--truth_comparison", action="store_true", help="Use truth comparison in the judge prompt")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode for additional logging and checks")
 
 
     args = parser.parse_args()
@@ -1250,6 +1251,7 @@ if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
+    print(args.debug)
     print(args.contrastive_training, args.contrastive_eval)
     if not args.contrastive_training and not args.contrastive_eval:
         print("This will train using PRO vs PRO and eval on PRO vs PRO comparison as described in GRPO-README")
@@ -1378,7 +1380,7 @@ if __name__ == "__main__":
     ## Set which data set 
     if args.enable_detailed_logging:
         logger.info(f"Loading dataset: {args.dataset_name}")
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, args.contrastive_training,)
+    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, args.contrastive_training, debug=args.debug)
     if args.enable_detailed_logging:
         logger.info(f"Dataset loaded successfully")
 
@@ -1528,10 +1530,10 @@ if __name__ == "__main__":
                     eval_wandb_log["eval/pp_trained_defended_pro"] = pp_eval_metrics.get("trained_defended_pro", 0)
                     eval_wandb_log["eval/pp_win_rate_per_question"] = pp_eval_metrics.get("win_rate_per_question", 0)
                 
-                # Add average scores
-                avg_scores = contrastive_eval_metrics.get("average_scores", {})
-                for key, value in avg_scores.items():
-                    eval_wandb_log[f"eval/{key}"] = value
+                # # Add average scores
+                # avg_scores = contrastive_eval_metrics.get("average_scores", {})
+                # for key, value in avg_scores.items():
+                #     eval_wandb_log[f"eval/{key}"] = value
                 
                 wandb.log(eval_wandb_log)
             
@@ -1662,10 +1664,10 @@ if __name__ == "__main__":
                 "step": round_num
             }
             
-            # Add reward metrics if available (including prefixed ones)
-            for key, value in train_metrics.items():
-                if key.startswith('rewards/') or key.startswith('pro_rewards/') or key.startswith('con_rewards/'):
-                    wandb_log[f"train/{key}"] = value
+            # # Add reward metrics if available (including prefixed ones)
+            # for key, value in train_metrics.items():
+            #     if key.startswith('rewards/') or key.startswith('pro_rewards/') or key.startswith('con_rewards/'):
+            #         wandb_log[f"train/{key}"] = value
             
             wandb.log(wandb_log)
 
