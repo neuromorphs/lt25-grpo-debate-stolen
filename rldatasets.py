@@ -108,13 +108,13 @@ class DebateDataLoader(DataLoader):
             self.current_index += 1
             
         topic = self.topics[idx]
-        position = random.choice(["PRO", "CON"])
+        positions = ["PRO", "CON"]
         
         # Format the question to include both topic and position
-        formatted_question = f"Debate Topic: {topic}\nPosition: {position}"
+        formatted_question = f"Debate Topic: {topic}"
         
         # The "answer" in this case is the position, which is needed for evaluation
-        return formatted_question
+        return formatted_question, positions
 
     def reset(self):
         self.current_index = 0
@@ -380,8 +380,8 @@ class ChoppedDataLoader(DataLoader):
         
         # Format the question to include the mystery basket
         formatted_question = f"Mystery Basket:\n" + "\n".join(f"- {ingredient}" for ingredient in basket)
-        
         return formatted_question
+
 
     def reset(self):
         self.current_index = 0
