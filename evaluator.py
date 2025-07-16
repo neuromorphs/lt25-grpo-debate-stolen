@@ -66,12 +66,13 @@ class RewardEvaluator(ABC):
         pass
 
 
-def get_evaluator(name: str) -> RewardEvaluator:
+def get_evaluator(name: str, partial: bool = False) -> RewardEvaluator:
     """
     Get the appropriate reward evaluator for a given task.
     
     Args:
         name: Name of the task/dataset to get evaluator for
+        partial: If True, return the class name, otherwise return an instance of the class
         
     Returns:
         RewardEvaluator instance for the specified task
@@ -80,11 +81,11 @@ def get_evaluator(name: str) -> RewardEvaluator:
         NotImplementedError: If evaluator for given task is not implemented
     """
     if name.lower() == "debate":
-        return DebateEvaluator()
+        return DebateEvaluator if partial else DebateEvaluator()
     elif name.lower() == "ld":
-        return LDEvaluator()
+        return LDEvaluator if partial else LDEvaluator()
     elif name.lower() == "chopped":
-        return ChoppedEvaluator()
+        return ChoppedEvaluator if partial else ChoppedEvaluator()
     else:
         raise NotImplementedError(f"No evaluator implemented for {name}")
 
@@ -95,9 +96,22 @@ class DebateEvaluator(RewardEvaluator):
     Reward evaluator for debate responses using two different approaches:
     1. For training: round-robin tournament scoring between generated responses
     2. For testing: head-to-head debates against the base model
+
+    Updated arguments:
+    - train_reward_procon: is True, then we use the pro-con judge prompt and 
+        evaluate the pro-con rewards. This will use the compare model to generate
+        the completions for the other side (see `main.py`).
+    - train_reward_symmetric: is True, then we evaluate the rewards symmetrically
+        (i.e., we sum the wins and losses from [a1, a2] *and* [a2, a1])
     """
     
-    def __init__(self):
+    def __init__(self, train_reward_symmetric: bool = False, train_reward_procon: bool = False):
+        # Set whether to train on both directions of comparisons
+        # (i.e., use judge to score both [a1, a2] and [a2, a1])
+        self.train_reward_symmetric = train_reward_symmetric
+        # Set whether to train on pro-con rewards
+        self.train_reward_procon = train_reward_procon
+        
         self.num_reward_functions = 4  # debate score + 3 format rewards
         self.judge_prompt = """You are an impartial debate judge. You will be shown two debate responses on the same topic, 
         arguing the same side (PRO or CON). Your task is to determine which argument was more compelling based on:
@@ -112,6 +126,30 @@ class DebateEvaluator(RewardEvaluator):
         Argument 1:
         {arg1_response}
         
+        Argument 2:
+        {arg2_response}
+        
+        Which response was more compelling? Respond with EXACTLY one of these options:
+        - ARGUMENT_1_WINS
+        - ARGUMENT_2_WINS
+
+        YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED
+        """
+        self.judge_prompt_procon = """You are an impartial debate judge. You will be shown two debate responses on the same topic, 
+        arguing for different sides (PRO or CON). Your task is to determine which argument was more compelling based on:
+        1. Logical reasoning and evidence
+        2. Clear structure and organization
+        3. Effective use of examples
+        4. Respectful tone
+        5. Addressing potential counterarguments
+        
+        Topic: {topic}
+        
+        Side 1: {side1}
+        Argument 1:
+        {arg1_response}
+        
+        Side 2: {side2}
         Argument 2:
         {arg2_response}
         
@@ -158,17 +196,31 @@ class DebateEvaluator(RewardEvaluator):
             return count
             
         return [count_xml(r) for r in completions]
-        
+
     def _compute_train_rewards(
         self,
         input_prompt: str,
         all_models: Dict[str, Any],
         train_model_completions: List[str],
-        device: str
+        compare_model_completions: Optional[List[str]],
+        device: str,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Round-robin tournament scoring for training + format rewards."""
         num_completions = len(train_model_completions)
         rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+
+        position = input_prompt.split('\nPosition:')[1].strip()
+        counter_position = "CON" if position == "PRO" else "PRO"
+        topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+
+        # If pro-con rewards are enabled but compare_model_completions is not provided,
+        # fall back to pro-pro rewards with symmetric rewards
+        if self.train_reward_procon and compare_model_completions is None:
+            print("Warning: Pro-con rewards are enabled, but compare_model_completions is not provided.")
+            print("Please provide compare_model_completions to use pro-con rewards.")
+            print("Falling back to pro-pro rewards with symmetric rewards.")
+            self.train_reward_procon = False
+            self.train_reward_symmetric = True
         
         # Track wins/losses for each completion
         wins = torch.zeros(num_completions, device=device)
@@ -176,34 +228,69 @@ class DebateEvaluator(RewardEvaluator):
         
         # Get debate scores using round-robin tournament
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
-            for j in range(i + 1, num_completions):
-                topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+            # Get start index for the inner loop
+            # - pro-pro (original) and not symmetric (original) -> start at i+1
+            # - pro-pro (original) and symmetric -> start at 0
+            # - pro-con -> start at 0
+            j_start_idx = 0
+            if self.train_reward_symmetric or self.train_reward_procon:
+                j_start_idx = (i+1)
+            for j in range(j_start_idx, num_completions):
+                # Skip self-comparisons: pro-pro and symmetric (meaningless rewards)
+                if (not self.train_reward_procon) and (i == j):
+                    continue
+
                 response1 = self._extract_xml_answer(train_model_completions[i])
-                response2 = self._extract_xml_answer(train_model_completions[j])
                 
-                judge_prompt = self.judge_prompt.format(
-                    topic=topic,
-                    arg1_response=response1,
-                    arg2_response=response2
-                )
+                # Select judge prompt
+                # If pro-con rewards are enabled, use compare_model_completions
+                # Otherwise, use train_model_completions
+                if self.train_reward_procon:
+                    response2 = self._extract_xml_answer(compare_model_completions[j])
+                    judge_prompt = self.judge_prompt_procon
+                else:
+                    response2 = self._extract_xml_answer(train_model_completions[j])
+                    judge_prompt = self.judge_prompt
                 
-                # Get judge's decision using the interface
-                judge_response = all_models["judge_model"].generate(
-                    system_prompt="You are an impartial debate judge.",
-                    user_prompt=judge_prompt,
-                    max_new_tokens=50,
-                    temperature=0.1
-                ).strip().upper()
-                
-                if "ARGUMENT_1_WINS" in judge_response:
-                    wins[i] += 1
-                    losses[j] += 1
-                elif "ARGUMENT_2_WINS" in judge_response:
-                    wins[j] += 1
-                    losses[i] += 1
+                for order_idx in range(2 if self.train_reward_procon else 1):
+                    judge_prompt = self.judge_prompt.format(
+                        topic=topic,
+                        arg1_response=response1 if order_idx == 0 else response2,
+                        arg2_response=response2 if order_idx == 0 else response1,
+                        # side will be ignored for pro-pro rewards
+                        side1=position if order_idx == 0 else counter_position,
+                        side2=counter_position if order_idx == 0 else position,
+                    )
+                    
+                    # Get judge's decision using the interface
+                    judge_response = all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=50,
+                        temperature=0.1
+                    ).strip().upper()
+                    
+                    if "ARGUMENT_1_WINS" in judge_response:
+                        wins[i] += 1
+                        losses[j] += 1
+                    elif "ARGUMENT_2_WINS" in judge_response:
+                        wins[j] += 1
+                        losses[i] += 1
+
+        # Get total number of matches
+        if self.train_reward_symmetric and self.train_reward_procon:
+            # pro-con symmetric -> 2 * N^2 matches
+            total_matches = 2 * (num_completions**2)
+        elif self.train_reward_symmetric:
+            # pro-pro symmetric -> (N-1)^2 matches (excl. self-comparisons)
+            total_matches = (num_completions-1)**2
+        elif self.train_reward_procon:
+            # pro-con without symmetric -> N^2 matches
+            total_matches = num_completions**2
+        else:
+            total_matches = num_completions - 1  # number of matches per completion
 
         # Calculate normalized scores (-1.5 to 1.5 range)
-        total_matches = num_completions - 1  # number of matches per completion
         win_rate = wins / total_matches
         loss_rate = losses / total_matches
         debate_scores = (win_rate - loss_rate) * 1.5  # Scale to desired range
@@ -325,7 +412,7 @@ class DebateEvaluator(RewardEvaluator):
         if is_test:
             return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
         else:
-            return self._compute_train_rewards(input_prompt, all_models, train_model_completions, device)
+            return self._compute_train_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device)
             
     def get_reward_breakdown(self, rewards: torch.Tensor) -> Dict[str, float]:
         """Convert raw reward scores to a labeled dictionary."""

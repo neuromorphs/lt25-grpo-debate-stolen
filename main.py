@@ -286,7 +286,8 @@ def score_completions(
     question: str,
     eval_class: evaluator.RewardEvaluator,
     device: str,
-    args: argparse.Namespace
+    args: argparse.Namespace,
+    compare_model_completions: list[str] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float], dict]:
     """
     Score model completions and compute advantages for training.
@@ -320,9 +321,9 @@ def score_completions(
         input_prompt=question,
         all_models=all_models, 
         train_model_completions=completions_text, 
-        compare_model_completions=None,
+        compare_model_completions=compare_model_completions,
         device=device, 
-        is_test=False
+        is_test=False,
     )
     rewards = rewards_per_func.sum(dim=1)
 
@@ -415,6 +416,32 @@ def compute_loss(
 
     return loss, metrics
 
+def get_compare_model_completions(
+    all_models: dict,
+    question: str,
+    train_loader: rldatasets.DataLoader,
+    device: str,
+    args: argparse.Namespace
+):
+    # Get compare model completions
+    position = question.split('\nPosition:')[1].strip()
+    counter_position = "CON" if position == "PRO" else "PRO"
+    topic = question.split('\nPosition:')[0].split("Debate Topic: ")[1]
+    compare_prompt = question.replace(position, counter_position)
+
+    # Generate completions for compare model using the interface
+    compare_completions_text = []
+    for _ in range(args.num_chains):
+        completion = all_models["compare_model"].generate(
+            system_prompt=train_loader.pre_prompt,
+            user_prompt=compare_prompt,
+            max_new_tokens=args.max_completion_length,
+            temperature=args.temperature
+        )
+        compare_completions_text.append(completion)
+
+    return compare_completions_text
+
 def grpo_loss(
         train_loader,
         all_models: dict,
@@ -456,9 +483,18 @@ def grpo_loss(
     prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, _ = generate_completions(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
     )
+
+    # Get compare model completions
+    compare_model_completions = None
+    if args.train_reward_procon:
+        compare_model_completions = get_compare_model_completions(
+            all_models, question, train_loader, device, args
+        )
+
     # Score completions
     rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
-        completions_text, question, eval_class, device, args
+        completions_text, question, eval_class, device, args,
+        compare_model_completions,
     )
 
     # Write log data
@@ -525,6 +561,10 @@ def parse_args():
     parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name")
     parser.add_argument("--wandb_tags", type=str, nargs="*", default=[], help="Wandb tags for the run")
 
+    # New parameters
+    parser.add_argument("--train_reward_symmetric", action="store_true", help="Whether to train on both directions of rewards (i.e., use judge to score both [a1, a2] and [a2, a1])")
+    parser.add_argument("--train_reward_procon", action="store_true", help="Whether to train on rewards from pro-con comparisons instead of pro-pro comparisons.")
+
     args = parser.parse_args()
     return args
 
@@ -548,7 +588,7 @@ if __name__ == "__main__":
     # Get judge and compare models using the new interfaces
     judge_model = llms.get_judge_model(args.judge_model_name, device)
     compare_model = llms.get_compare_model(args.compare_model_name, device)
-    
+
     # Simplified all_models dictionary
     all_models = {
         "training_model": model,
@@ -563,8 +603,11 @@ if __name__ == "__main__":
     train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
 
     ## Set which evaluation criteria to use 
-    eval_class = evaluator.get_evaluator(args.evaluator)
-
+    eval_class = evaluator.get_evaluator(args.evaluator, partial=True)
+    eval_class = eval_class(
+        train_reward_symmetric=args.train_reward_symmetric, 
+        train_reward_procon=args.train_reward_procon,
+    )
 
     # Setup logging 
     os.makedirs(args.output_dir, exist_ok=True)
