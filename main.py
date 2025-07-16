@@ -339,8 +339,8 @@ def score_contrastive_completions(
         'prompt': {
             'text': input_prompt['question'],
         },
-        'pro_generations': [],
-        'con_generations': []
+        'generations': [],
+        'generations_2': []
     }
 
     # Compute both scenarios and average debate scores
@@ -381,15 +381,22 @@ def score_contrastive_completions(
     metrics_2['mean_rewards'] = rewards_per_func_2.mean().item()
 
     # Final data
-    data_map = ((completions_text, rewards_per_func, positions[0]), 
-                (completions_text_2, rewards_per_func_2, positions[1]))
+    data_map = ((completions_text, rewards_per_func, ""), 
+                (completions_text_2, rewards_per_func_2, "_2"))
 
-    for _, (completions, rewards_per_func, pos) in enumerate(data_map):
+    for _, (completions, rewards_per_func, suffix) in enumerate(data_map):
         rewards = rewards_per_func.sum(dim=1)
-        log_data[f'{pos}_generations'] = [{
+        log_data[f'generations{suffix}'] = [{
             'response': comp,
             'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
         } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
+
+
+        # Log judge response for this specific comparison
+        if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
+            generation_data['judge_response'] = eval_class.last_judge_responses[i]
+
+        log_data[f'generations{suffix}'].append(generation_data)
 
     truth_metrics={'train/truth_win_rate': rewards_per_func[:, 0].mean().item()/1.5}
 
