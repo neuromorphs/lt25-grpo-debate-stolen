@@ -5,6 +5,7 @@ import numpy as np
 import torch.nn.functional as F
 from typing import Any, Dict, Optional
 
+import random
 import re
 
 ####################
@@ -136,3 +137,23 @@ def get_per_token_logps(model, input_ids, attention_mask, logits_to_keep):
     # See https://github.com/huggingface/trl/issues/2770
     logits = logits[:, -logits_to_keep:]
     return selective_log_softmax(logits, input_ids)  #  compute logprobs for the input tokens
+
+def extract_winner_by_count(response):
+    """
+    Count occurrences of ARGUMENT_1_WINS and ARGUMENT_2_WINS in response.
+    Returns the one that appears most frequently.
+    """
+    response_upper = response.upper()
+    
+    # Count occurrences
+    count_arg1 = response_upper.count('ARGUMENT_1_WINS')
+    count_arg2 = response_upper.count('ARGUMENT_2_WINS')
+    
+    # Select winner based on highest count
+    if count_arg1 > count_arg2:
+        return "ARGUMENT_1_WINS"
+    elif count_arg2 > count_arg1:
+        return "ARGUMENT_2_WINS"
+    else:
+        # Tie case - fallback to random or first occurrence
+        return random.choice(["ARGUMENT_1_WINS", "ARGUMENT_2_WINS"])

@@ -173,3 +173,7 @@ slurm*
 output/*
 .vscode/launch.json
 launch.sh
+wandb_key.txt
+output_pc/*
+wandb*
+run.sh

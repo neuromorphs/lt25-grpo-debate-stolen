@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Any, Optional
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 from model_interface import ModelInterface
-
+from utils import extract_winner_by_count
 from tqdm import tqdm
 
 class RewardEvaluator(ABC):
@@ -116,7 +116,7 @@ class DebateEvaluator(RewardEvaluator):
         - ARGUMENT_1_WINS
         - ARGUMENT_2_WINS
 
-        YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED
+        YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED. ONLY RESPOND WITH ARGUMENT_1_WINS OR ARGUMENT_2_WINS.
         """
         
     def _extract_xml_answer(self, text: str) -> str:
@@ -227,14 +227,18 @@ class DebateEvaluator(RewardEvaluator):
                     judge_responses.append(response)
 
             # Store judge responses for logging
-            self.last_judge_responses.extend(judge_responses)
+
             
             # Process judge responses for completion i
             for j, judge_response in zip(comparison_indices, judge_responses):
                 judge_response = judge_response.strip().upper()
-                
-                if "ARGUMENT_1_WINS" in judge_response:
+                answer_parsed = extract_winner_by_count(judge_response)
+
+                if answer_parsed == "ARGUMENT_1_WINS":
                     wins[i, j] = 1
+                
+                # Store judge responses for logging
+                self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
 
         # Calculate normalized scores (-1.5 to 1.5 range)
         total_matches = num_completions  # number of matches per completion
@@ -344,19 +348,20 @@ class DebateEvaluator(RewardEvaluator):
                     )
                     judge_responses.append(response)
             
-            # Store judge responses for logging
-            self.last_judge_responses.extend(judge_responses)
             
             # Process judge responses for completion i
             for j, judge_response in zip(comparison_indices, judge_responses):
                 judge_response = judge_response.strip().upper()
-                
-                if "ARGUMENT_1_WINS" in judge_response:
+                answer_parsed = extract_winner_by_count(judge_response)
+
+                if answer_parsed == "ARGUMENT_1_WINS":
                     wins[i] += 1
                     losses[j] += 1
-                elif "ARGUMENT_2_WINS" in judge_response:
+                elif answer_parsed == "ARGUMENT_2_WINS":
                     wins[j] += 1
                     losses[i] += 1
+                # Store judge responses for logging
+                self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
 
         # Calculate normalized scores (-1.5 to 1.5 range)
         total_matches = num_completions - 1  # number of matches per completion
@@ -451,8 +456,9 @@ class DebateEvaluator(RewardEvaluator):
 
         for i, judge_response in enumerate(judge_responses):
             judge_response = judge_response.strip().upper()
-            
-            if "ARGUMENT_1_WINS" in judge_response:
+            answer_parsed = extract_winner_by_count(judge_response)
+
+            if answer_parsed == "ARGUMENT_1_WINS":
                 score = 1.0
                 rewards_per_func[i, 0] = score
                 wins += 1
@@ -463,7 +469,7 @@ class DebateEvaluator(RewardEvaluator):
             rewards_per_func[i, 3] = xml_count[i]
 
             # Store judge responses for logging
-            self.last_judge_responses.append(judge_response)
+            self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
 
         win_rate = wins / num_debates
         metrics = {

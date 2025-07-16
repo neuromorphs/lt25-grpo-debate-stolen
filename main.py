@@ -930,6 +930,7 @@ if __name__ == "__main__":
 
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"): #TLOOP
         print(f"Round {round_num}")
+        if round_num == 0: eval_metrics = {}
         # Evaluate on test set every so often 
         if round_num % args.eval_iterations == 0 and round_num > 0: #TODO: eval
             eval_metrics, eval_accuracy = eval_on_test_set(
