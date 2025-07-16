@@ -48,6 +48,9 @@ def eval_on_test_set(
     with open(log_file, 'w') as f:
         total_comparisons = 0
         total_wins = 0
+        wins_first = 0
+        wins_second = 0
+        trained_first_cnt = 0
         
         for (question, positions) in tqdm(test_loader, desc="Evaluating on test set"):
             num_examples += 1
@@ -78,30 +81,37 @@ def eval_on_test_set(
             )
 
             # Generate completions for compare model using the interface
-            compare_completions_text = []
-            for _ in range(args.num_chains):
-                completion = all_models["compare_model"].generate(
-                    system_prompt=test_loader.pre_prompt,
-                    user_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'],
-                    max_new_tokens=args.max_completion_length,
-                    temperature=args.temperature
-                )
-                compare_completions_text.append(completion)
+            compare_completions_text = all_models["compare_model"].generate_batch(
+                system_prompt=test_loader.pre_prompt,
+                user_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'],
+                num_completions=args.num_chains,
+                max_new_tokens=args.max_completion_length,
+                temperature=args.temperature
+            )
 
+            trained_first = random.choice([True, False]) # Randomly choose which model is first
+            trained_first_cnt += 1 if trained_first else 0
+            arg1 = completions_text         if trained_first else compare_completions_text
+            arg2 = compare_completions_text if trained_first else completions_text
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
                 input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
                 all_models=all_models, 
-                train_model_completions=completions_text, 
-                compare_model_completions=compare_completions_text,
+                train_model_completions=arg1, 
+                compare_model_completions=arg2,
                 device=device,
-                is_test=True
+                is_test=True, 
+                constrative=args.contrastive_eval,
             )
             
             # Track total comparisons and wins
             comparisons_this_question = len(completions_text)
             total_comparisons += comparisons_this_question
             total_wins += reward_metrics['num_wins']
+            if trained_first:
+                wins_first += reward_metrics['num_wins']
+            else:
+                wins_second += reward_metrics['num_wins']
 
             # For each completion pair, log the results
             for i, (completion, compare_completion) in enumerate(zip(completions_text, compare_completions_text)):
@@ -175,6 +185,8 @@ def eval_on_test_set(
         metrics = {
             'win_rate': win_rate,
             'total_wins': total_wins,
+            'win_first': wins_first,
+            'win_second': wins_second,
             'total_comparisons': total_comparisons,
             'num_examples': num_examples,
             'average_scores': avg_scores
@@ -930,6 +942,7 @@ if __name__ == "__main__":
 
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"): #TLOOP
         print(f"Round {round_num}")
+        if round_num == 0: eval_metrics = {}
         # Evaluate on test set every so often 
         if round_num % args.eval_iterations == 0 and round_num > 0: #TODO: eval
             eval_metrics, eval_accuracy = eval_on_test_set(
@@ -1000,7 +1013,9 @@ if __name__ == "__main__":
                 f"train/learning_rate": train_metrics.get("learning_rate", 0),
                 f"train/grad_norm": grad_norm,
                 f"eval/win_rate": eval_metrics.get("win_rate", 0),
-                f"eval/total_win_rate": eval_metrics.get("total_win_rate", 0),
+                f"eval/total_wins": eval_metrics.get("total_wins", 0),
+                f"eval/wins_first": eval_metrics.get("wins_first", 0),
+                f"eval/wins_second": eval_metrics.get("wins_second", 0),
                 f"eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
                 f"eval/num_examples": eval_metrics.get("num_examples", 0),
                 f"eval/average_scores": eval_metrics.get("average_scores", 0),
@@ -1008,13 +1023,13 @@ if __name__ == "__main__":
             if args.contrastive_training:
                 wandb_log.update({
                 f"train/{positions[0]}_rewards/mean_win_rate_first": train_metrics.get(f"{positions[0]}_rewards/mean_win_rate_first", 0),
-                f"train/{positions[0]}_rewards/mean_win_rate_second": train_metrics.get(f"{positions[0]}_rewards/mean_win_rate_second", 0),
+                f"train/{positions[0]}_rewards/mean_win_rate_2_second": train_metrics.get(f"{positions[0]}_rewards/mean_win_rate_2_second", 0),
                 f"train/{positions[0]}_rewards/strict_format": train_metrics.get(f"{positions[0]}_rewards/strict_format", 0),
                 f"train/{positions[0]}_rewards/soft_format": train_metrics.get(f"{positions[0]}_rewards/soft_format", 0),
                 f"train/{positions[0]}_rewards/xml_count": train_metrics.get(f"{positions[0]}_rewards/xml_count", 0),
                 f"train/{positions[0]}_mean_rewards": train_metrics.get(f"{positions[0]}_mean_rewards", 0),
                 f"train/{positions[1]}_rewards/mean_win_rate_first": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_first", 0),
-                f"train/{positions[1]}_rewards/mean_win_rate_second": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_second", 0),
+                f"train/{positions[1]}_rewards/mean_win_rate_2_second": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_2_second", 0),
                 f"train/{positions[1]}_rewards/strict_format": train_metrics.get(f"{positions[1]}_rewards/strict_format", 0),
                 f"train/{positions[1]}_rewards/soft_format": train_metrics.get(f"{positions[1]}_rewards/soft_format", 0),
                 f"train/{positions[1]}_rewards/xml_count": train_metrics.get(f"{positions[1]}_rewards/xml_count", 0),
