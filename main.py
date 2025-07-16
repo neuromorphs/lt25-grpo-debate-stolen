@@ -557,11 +557,11 @@ def grpo_loss(
     """
 
     
-    position_id = 0 if args.dataset_name == "debate_code" else random.choice([0,1]) 
+    # position_id = 0 if args.dataset_name == "debate_code" else random.choice([0,1]) 
     
     prompt = [
         {'role': 'system', 'content': test_loader.pre_prompt},
-        {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[position_id]}"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[0]}"}
     ]
     prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
 
@@ -573,14 +573,13 @@ def grpo_loss(
     if args.contrastive: 
         raise NotImplementedError("Contrastive training not implemented in this function")
         prompt_2 = prompt.copy()
-        prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1-position_id]}"
+        prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1]}"
         prompt_text_2 = all_models["training_model_tokenizer"].apply_chat_template(prompt_2, tokenize=False)
         prompt_completion_ids_2, prompt_2_ids, completion_ids_2, attention_mask_2, completions_text_2, _ = generate_completions(
             all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
         )
-        fixed_positions = [positions[position_id], positions[1-position_id]]
         rewards, advantages, rewards_per_func, rewards_2, advantages_2, rewards_per_func_2, metrics, log_data = score_contrastive_completions(
-        completions_text, completions_text_2, input_prompt, fixed_positions, eval_class, device, args
+        completions_text, completions_text_2, input_prompt, positions, eval_class, device, args
     ) 
     else: 
         # Score completions
@@ -656,8 +655,11 @@ def parse_args():
     parser.add_argument("--enable_wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--wandb_project", type=str, default="grpo-debate", help="Wandb project name")
     parser.add_argument("--wandb_key_file", type=str, default="wandb_key.txt", help="Path to file containing wandb API key")
-
-
+    
+    args = parser.parse_args()
+    
+    # Convert string arguments to boolean
+    args.contrastive_training = args.contrastive_training.lower() == "true"
 
     return args
 
@@ -665,7 +667,7 @@ if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
-    if args.debate_name == "debate_code" and args.contrastive_training == False:
+    if args.dataset_name == "debate_code" and args.contrastive_training == False:
         raise ValueError("Contrastive training must be enabled for debate_code dataset")
 
     if args.enable_wandb and WANDB_AVAILABLE:
@@ -693,8 +695,6 @@ if __name__ == "__main__":
                 print("✓ Wandb initialized successfully!")
                 print(f"🔗 View your run at: https://wandb.ai/{wandb.run.entity}/{args.wandb_project}/runs/{wandb.run.id}")
                 
-                if args.enable_detailed_logging:
-                    logger.info(f"Initialized wandb project: {args.wandb_project}, run: {run_name}")
             else:
                 print(f"❌ Error: Wandb key file {args.wandb_key_file} not found.")
                 print("Please create the file and add your wandb API key to enable logging.")
@@ -727,7 +727,7 @@ if __name__ == "__main__":
 
     # Get judge and compare models using the new interfaces
     judge_model = llms.get_judge_model(args.judge_model_name, device)
-    compare_model = llms.get_compare_model(args.compare_model_name, device)
+    compare_model = judge_model
     
     # Simplified all_models dictionary
     all_models = {
@@ -803,7 +803,7 @@ if __name__ == "__main__":
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"):
         print(f"Round {round_num}")
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations == 0:
+        if round_num % args.eval_iterations > 0:
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,
