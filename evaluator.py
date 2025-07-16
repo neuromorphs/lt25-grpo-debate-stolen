@@ -299,6 +299,7 @@ class DebateEvaluator(RewardEvaluator):
         
         topic = prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
         self.last_judge_responses = []
+        judge_prompts = []
         for i in range(num_debates):
             # Get trained model's response
             trained_response = self._extract_xml_answer(train_model_completions[i])
@@ -312,14 +313,18 @@ class DebateEvaluator(RewardEvaluator):
                 arg1_response=trained_response,
                 arg2_response=compare_response
             )
+            judge_prompts.append(judge_prompt)
             
-            # Get judge's decision using the interface
-            judge_response = all_models["judge_model"].generate(
-                system_prompt="You are an impartial debate judge.",
-                user_prompt=judge_prompt,
-                max_new_tokens=50,
-                temperature=0.1
-            ).strip().upper()
+        # Get judge's decision using the interface
+        judge_responses = all_models["judge_model"].generate_batch_prompts(
+            system_prompt="You are an impartial debate judge.",
+            user_prompts=judge_prompts,
+            max_new_tokens=50,
+            temperature=0.1
+        )
+
+        for i, judge_response in enumerate(judge_responses):
+            judge_response = judge_response.strip().upper()
             
             if "ARGUMENT_1_WINS" in judge_response:
                 score = 1.0
