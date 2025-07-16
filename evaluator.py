@@ -385,7 +385,7 @@ class DebateEvaluator(RewardEvaluator):
             "rewards/mean_strict_format": strict_format.mean().item(),
             "rewards/mean_soft_format": soft_format.mean().item(),
             "rewards/mean_xml_count": xml_count.mean().item(),
-            "reward": rewards_per_func.sum(dim=1).mean().item()
+            "mean_reward": rewards_per_func.sum(dim=1).mean().item()
         }
         
         return rewards_per_func, metrics

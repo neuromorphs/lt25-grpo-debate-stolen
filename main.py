@@ -306,8 +306,8 @@ def compute_contrastive_advantages(
     print(f"advantages: {advantages}")
     print(f"advantages_2: {advantages_2}")
 
-    metrics["reward_std"] = std_grouped_rewards.mean().item()
-    metrics["reward_std_2"] = std_grouped_rewards_2.mean().item()
+    metrics["reward_std"] = std_grouped_rewards.mean().item() #TODO: not used bc metrics is not an output
+    metrics["reward_std_2"] = std_grouped_rewards_2.mean().item() #TODO: same
     # print(f"Pro Reward std: {metrics['pro_reward_std']}")
     # print(f"Con Reward std: {metrics['con_reward_std']}")
     print(f"Metrics: {metrics}")
@@ -467,7 +467,7 @@ def compute_contrastive_loss(
     metrics["response_length"] = response_length
     mean_kl = ((intermediary['per_token_kl'] * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
     print(f"PRO mean KL: {mean_kl}")
-    metrics["kl"] = mean_kl.item()
+    metrics["mean_kl"] = mean_kl.item()
     
     # CON stance metrics  
     response_length_2 = completion_mask_2.sum(1).float().mean().item()
@@ -476,13 +476,14 @@ def compute_contrastive_loss(
     metrics["response_length_2"] = response_length_2
     mean_kl_2 = ((intermediary['per_token_kl'] * completion_mask_2).sum(dim=1) / completion_mask_2.sum(dim=1)).mean()
     print(f"mean KL 2: {mean_kl_2}")
-    metrics["kl_2"] = mean_kl_2.item()
+    metrics["mean_kl_2"] = mean_kl_2.item()
     
     # Combined metrics
     metrics["mean_response_length"] = (response_length + response_length_2) / 2
-    metrics["mean_kl"] = (mean_kl + mean_kl_2).item() / 2
+    metrics["mean_kl_1&2"] = (mean_kl + mean_kl_2).item() / 2
     metrics["loss"] = loss.item()
     metrics["loss_2"] = loss_2.item()
+    metrics["total_loss"] = total_loss.item()
     
     return total_loss, metrics
 
@@ -623,9 +624,10 @@ def compute_loss(
     # Additional metrics
     metrics = {}
     response_length = completion_mask.sum(1).float().mean().item()
-    metrics["response_length"] = response_length
+    metrics["mean_response_length"] = response_length
     mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
-    metrics["kl"] = mean_kl.item()
+    metrics["mean_kl"] = mean_kl.item()
+    metrics["loss"] = loss.item()
 
     return loss, metrics, {'per_token_kl': per_token_kl, 'response_length': response_length, 'mean_kl': mean_kl}
 
@@ -985,6 +987,14 @@ if __name__ == "__main__":
 
         if args.enable_wandb:
             wandb_log = {
+                f"train/round_num": round_num,
+                f"train/learning_rate": train_metrics.get("learning_rate", 0),
+                f"train/grad_norm": grad_norm,
+                f"eval/win_rate": eval_metrics.get("win_rate", 0),
+                f"eval/total_win_rate": eval_metrics.get("total_win_rate", 0),
+                f"eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
+                f"eval/num_examples": eval_metrics.get("num_examples", 0),
+                f"eval/average_scores": eval_metrics.get("average_scores", 0),
             }
             if args.contrastive_training:
                 wandb_log.update({
@@ -993,13 +1003,33 @@ if __name__ == "__main__":
                 f"train/{positions[0]}_rewards/strict_format": train_metrics.get(f"{positions[0]}_rewards/strict_format", 0),
                 f"train/{positions[0]}_rewards/soft_format": train_metrics.get(f"{positions[0]}_rewards/soft_format", 0),
                 f"train/{positions[0]}_rewards/xml_count": train_metrics.get(f"{positions[0]}_rewards/xml_count", 0),
-                f"train/{positions[0]}_reward": train_metrics.get(f"{positions[0]}_reward", 0),
+                f"train/{positions[0]}_mean_rewards": train_metrics.get(f"{positions[0]}_mean_rewards", 0),
                 f"train/{positions[1]}_rewards/mean_win_rate_first": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_first", 0),
                 f"train/{positions[1]}_rewards/mean_win_rate_second": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_second", 0),
                 f"train/{positions[1]}_rewards/strict_format": train_metrics.get(f"{positions[1]}_rewards/strict_format", 0),
                 f"train/{positions[1]}_rewards/soft_format": train_metrics.get(f"{positions[1]}_rewards/soft_format", 0),
                 f"train/{positions[1]}_rewards/xml_count": train_metrics.get(f"{positions[1]}_rewards/xml_count", 0),
-                f"train/{positions[1]}_reward": train_metrics.get(f"{positions[1]}_reward", 0),
+                f"train/{positions[1]}_mean_rewards": train_metrics.get(f"{positions[1]}_mean_rewards", 0),
+                f"train/mean_kl": train_metrics.get("mean_kl", 0),
+                f"train/mean_kl_2": train_metrics.get("mean_kl_2", 0),
+                f"train/mean_kl_1&2": train_metrics.get("mean_kl_1&2", 0),
+                f"train/mean_response_length": train_metrics.get("mean_response_length", 0),
+                f"train/mean_response_length_2": train_metrics.get("mean_response_length_2", 0),
+                f"train/mean_response_length_1&2": train_metrics.get("mean_response_length_1&2", 0),
+                f"train/loss": train_metrics.get("loss", 0),
+                f"train/loss_2": train_metrics.get("loss_2", 0),
+                f"train/total_loss": train_metrics.get("total_loss", 0),
+                })
+            else: 
+                wandb_log.update({
+                    f"train/rewards/mean_win_rate": train_metrics.get("rewards/mean_win_rate", 0),
+                    f"train/rewards/mean_strict_format": train_metrics.get("rewards/mean_strict_format", 0),
+                    f"train/rewards/mean_soft_format": train_metrics.get("rewards/mean_soft_format", 0),
+                    f"train/rewards/xml_count": train_metrics.get("rewards/xml_count", 0),
+                    f"train/mean_reward": train_metrics.get("mean_reward", 0),
+                    f"train/mean_kl": train_metrics.get("mean_kl", 0),
+                    f"train/mean_response_length": train_metrics.get("mean_response_length", 0),
+                    f"train/loss": train_metrics.get("loss", 0),
                 })
             
             # # Add reward metrics if available (including prefixed ones)
