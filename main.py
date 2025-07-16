@@ -49,13 +49,13 @@ def eval_on_test_set(
         total_comparisons = 0
         total_wins = 0
         
-        for question in tqdm(test_loader, desc="Evaluating on test set"):
+        for (question, positions) in tqdm(test_loader, desc="Evaluating on test set"):
             num_examples += 1
-
+            id_pos = random.choice([0, 1]) # TODO
             # 1. Prepare prompting
             prompt = [
                 {'role': 'system', 'content': test_loader.pre_prompt},
-                {'role': 'user', 'content': question}
+                {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[id_pos]}"}
             ]
             prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
 
@@ -147,7 +147,7 @@ def eval_on_test_set(
             f.write("\nSUMMARY METRICS:\n")
             f.write(f"Win rate: {reward_metrics['win_rate']:.2%}\n")
             f.write(f"Number of wins: {reward_metrics['num_wins']}\n")
-            f.write(f"Total comparisons: {reward_metrics['num_comparisons']}\n")
+            #f.write(f"Total comparisons: {reward_metrics['num_comparisons']}\n")
             f.write(f"Average format scores:\n")
             f.write(f"  Strict format: {reward_metrics['rewards/strict_format']:.4f}\n")
             f.write(f"  Soft format: {reward_metrics['rewards/soft_format']:.4f}\n")
@@ -423,10 +423,14 @@ def score_completions(
         'generations': []
     }
 
+    input_prompt = {
+        'question': question,
+    }
+
     # Format inputs as expected by evaluator
     # Get rewards and metrics from evaluator
     rewards_per_func, metrics = eval_class.compute_rewards(
-        input_prompt=question,
+        input_prompt=input_prompt,
         all_models=all_models, 
         train_model_completions=completions_text, 
         compare_model_completions=None,
@@ -570,7 +574,7 @@ def grpo_loss(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
     )
 
-    if args.contrastive: 
+    if args.contrastive_training: 
         raise NotImplementedError("Contrastive training not implemented in this function")
         prompt_2 = prompt.copy()
         prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1]}"
@@ -592,7 +596,7 @@ def grpo_loss(
     utils.write_generation_log(log_data, log_file)
 
     # Compute loss
-    if args.contrastive:
+    if args.contrastive_training:
         raise NotImplementedError("Contrastive training not implemented in this function")
     else:
         completion_mask = attention_mask[:, prompt_ids.size(1):]
@@ -740,7 +744,7 @@ if __name__ == "__main__":
     }
 
     ## Set which data set 
-    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name)
+    train_loader, test_loader = rldatasets.get_dataloaders(args.dataset_name, debug=args.debug)
 
     ## Set which evaluation criteria to use 
     eval_class = evaluator.get_evaluator(args.evaluator)
@@ -800,10 +804,10 @@ if __name__ == "__main__":
     accumulated_loss = 0
     optimizer.zero_grad()
 
-    for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"):
+    for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"): #TLOOP
         print(f"Round {round_num}")
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations > 0:
+        if round_num % args.eval_iterations == 0 and args.eval_iterations > 0: #TODO: eval
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,
@@ -843,7 +847,7 @@ if __name__ == "__main__":
         question, positions = next(train_loader)
 
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        total_loss, train_metrics = grpo_loss(train_loader, all_models, question, positions, eval_class, device, round_num, train_log_dir, args)
+        total_loss, train_metrics = grpo_loss(train_loader, all_models, question, positions, eval_class, device, round_num, train_log_dir, args) # TCALL
         
         # Gradient accumulation
         total_loss = total_loss
