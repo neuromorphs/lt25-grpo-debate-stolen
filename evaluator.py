@@ -273,12 +273,11 @@ class DebateEvaluator(RewardEvaluator):
         rewards_per_func[:, 3] = xml_count
         
         metrics = {
-            "rewards/win_rate": win_rate.mean().item(),
-            "rewards/win_rate_2": win_rate_2.mean().item(),
-            "rewards/strict_format": strict_format.mean().item(),
-            "rewards/soft_format": soft_format.mean().item(),
-            "rewards/xml_count": xml_count.mean().item(),
-            "reward": rewards_per_func.sum(dim=1).mean().item()
+            "rewards/mean_win_rate_first": win_rate.mean().item(),
+            "rewards/mean_win_rate_2_second": win_rate_2.mean().item(),
+            "rewards/mean_strict_format": strict_format.mean().item(),
+            "rewards/mean_soft_format": soft_format.mean().item(),
+            "rewards/mean_xml_count": xml_count.mean().item(),
         }
         
         return rewards_per_func, metrics, win_rate_2
@@ -386,10 +385,10 @@ class DebateEvaluator(RewardEvaluator):
         rewards_per_func[:, 3] = xml_count
         
         metrics = {
-            "rewards/debate_score": debate_scores.mean().item(),
-            "rewards/strict_format": strict_format.mean().item(),
-            "rewards/soft_format": soft_format.mean().item(),
-            "rewards/xml_count": xml_count.mean().item(),
+            "rewards/mean_win_rate": win_rate.mean().item(),
+            "rewards/mean_strict_format": strict_format.mean().item(),
+            "rewards/mean_soft_format": soft_format.mean().item(),
+            "rewards/mean_xml_count": xml_count.mean().item(),
             "reward": rewards_per_func.sum(dim=1).mean().item()
         }
         

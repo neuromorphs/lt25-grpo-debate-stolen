@@ -344,15 +344,17 @@ def score_contrastive_completions(
     }
 
     # Compute both scenarios and average debate scores
-    scenarios = [(completions_text, completions_text_2, True, 'one_first'), 
-                    (completions_text_2, completions_text, False, 'two_first')]
+    scenarios = [   
+        (completions_text,   completions_text_2, True,  'one_first'), 
+        (completions_text_2, completions_text,   False, 'two_first')
+    ]
 
     rewards_data = {}
-    for train_comps, comp_comps, pro_first, order in scenarios:
+    for train_comps, comp_comps, one_first, order in scenarios:
         rewards_per_func, stance_metrics, cross_score = eval_class.compute_rewards(
             input_prompt=input_prompt, all_models=all_models,
             train_model_completions=train_comps, compare_model_completions=comp_comps,
-            device=device, is_test=False, pro_first=pro_first
+            device=device, is_test=False, contrastive=True, one_first=one_first
         )
         
         # Store for cross-averaging
@@ -372,6 +374,12 @@ def score_contrastive_completions(
     rewards_per_func[:, 0]   = (2 * win_rate   - 1) * 1.5 
     rewards_per_func_2[:, 0] = (2 * win_rate_2 - 1) * 1.5
 
+    metrics['rewards/mean_debate_score'] = rewards_per_func[:, 0].mean().item()
+    metrics_2['rewards/mean_debate_score'] = rewards_per_func_2[:, 0].mean().item()
+
+    metrics['mean_rewards'] = rewards_per_func.mean().item()
+    metrics_2['mean_rewards'] = rewards_per_func_2.mean().item()
+
     # Final data
     data_map = ((completions_text, rewards_per_func, positions[0]), 
                 (completions_text_2, rewards_per_func_2, positions[1]))
@@ -387,7 +395,7 @@ def score_contrastive_completions(
 
     # modify every key of pro_metrics with a pro_ prefix
     metrics   = {f'{positions[0]}_{k}': v for k, v in metrics.items()}
-    metrics_2 = {f'{positions[0]}_{k}': v for k, v in metrics_2.items()}
+    metrics_2 = {f'{positions[1]}_{k}': v for k, v in metrics_2.items()}
     metrics = {**metrics, **metrics_2, **truth_metrics}
     rewards, rewards_2 = rewards_per_func.sum(dim=1), rewards_per_func_2.sum(dim=1)
 
@@ -481,7 +489,7 @@ def compute_contrastive_loss(
 
 def score_completions(
     completions_text: list[str],
-    question: str,
+    input_prompt: str,
     eval_class: evaluator.RewardEvaluator,
     device: str,
     args: argparse.Namespace
@@ -512,10 +520,6 @@ def score_completions(
         'generations': []
     }
 
-    input_prompt = {
-        'question': question,
-    }
-
     # Format inputs as expected by evaluator
     # Get rewards and metrics from evaluator
     rewards_per_func, metrics = eval_class.compute_rewards(
@@ -524,7 +528,9 @@ def score_completions(
         train_model_completions=completions_text, 
         compare_model_completions=None,
         device=device, 
-        is_test=False
+        is_test=False,
+        contrastive=False,
+        one_first=None
     )
     rewards = rewards_per_func.sum(dim=1)
 
@@ -668,22 +674,25 @@ def grpo_loss(
     prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, _ = generate_completions(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
     )
-
+    input_prompt = {
+        'question': question,
+    }
     if args.contrastive_training: 
-        raise NotImplementedError("Contrastive training not implemented in this function")
+        # raise NotImplementedError("Contrastive training not implemented in this function")
         prompt_2 = prompt.copy()
         prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1]}"
         prompt_text_2 = all_models["training_model_tokenizer"].apply_chat_template(prompt_2, tokenize=False)
         prompt_completion_ids_2, prompt_2_ids, completion_ids_2, attention_mask_2, completions_text_2, _ = generate_completions(
             all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
         )
+
         rewards, advantages, rewards_per_func, rewards_2, advantages_2, rewards_per_func_2, metrics, log_data = score_contrastive_completions(
         completions_text, completions_text_2, input_prompt, positions, eval_class, device, args
     ) 
     else: 
         # Score completions
         rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
-            completions_text, question, eval_class, device, args
+            completions_text, input_prompt, eval_class, device, args
         )
 
     # Write log data
@@ -692,7 +701,14 @@ def grpo_loss(
 
     # Compute loss
     if args.contrastive_training:
-        raise NotImplementedError("Contrastive training not implemented in this function")
+        completion_mask = attention_mask[:, prompt_ids.size(1):]
+        completion_mask_2 = attention_mask_2[:, prompt_2_ids.size(1):]
+        # raise NotImplementedError("Contrastive training not implemented in this function")
+        loss, loss_metrics = compute_contrastive_loss(
+            all_models["training_model"], all_models["base_model"],
+            prompt_completion_ids,   prompt_ids,   completion_ids,   attention_mask,   completion_mask,   advantages,
+            prompt_completion_ids_2, prompt_2_ids, completion_ids_2, attention_mask_2, completion_mask_2, advantages_2, args
+        )
     else:
         completion_mask = attention_mask[:, prompt_ids.size(1):]
         loss, loss_metrics, _ = compute_loss(
@@ -748,6 +764,7 @@ def parse_args():
 
     # new parameters
     parser.add_argument("--contrastive_training", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive training (PRO vs CON)")
+    parser.add_argument("--contrastive_eval", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive training (PRO vs CON)")
     parser.add_argument("--truth_optim", action="store_true", help="Use truth optimization for debate_code")
     parser.add_argument("--truth_comparison", action="store_true", help="Use truth comparison in the judge prompt")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode for additional logging and checks")
@@ -964,6 +981,33 @@ if __name__ == "__main__":
         train_metrics_total[round_num] = train_metrics
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
+
+        if args.enable_wandb:
+            wandb_log = {
+            }
+            if args.contrastive_training:
+                wandb_log.update({
+                f"train/{positions[0]}_rewards/mean_win_rate_first": train_metrics.get(f"{positions[0]}_rewards/mean_win_rate_first", 0),
+                f"train/{positions[0]}_rewards/mean_win_rate_second": train_metrics.get(f"{positions[0]}_rewards/mean_win_rate_second", 0),
+                f"train/{positions[0]}_rewards/strict_format": train_metrics.get(f"{positions[0]}_rewards/strict_format", 0),
+                f"train/{positions[0]}_rewards/soft_format": train_metrics.get(f"{positions[0]}_rewards/soft_format", 0),
+                f"train/{positions[0]}_rewards/xml_count": train_metrics.get(f"{positions[0]}_rewards/xml_count", 0),
+                f"train/{positions[0]}_reward": train_metrics.get(f"{positions[0]}_reward", 0),
+                f"train/{positions[1]}_rewards/mean_win_rate_first": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_first", 0),
+                f"train/{positions[1]}_rewards/mean_win_rate_second": train_metrics.get(f"{positions[1]}_rewards/mean_win_rate_second", 0),
+                f"train/{positions[1]}_rewards/strict_format": train_metrics.get(f"{positions[1]}_rewards/strict_format", 0),
+                f"train/{positions[1]}_rewards/soft_format": train_metrics.get(f"{positions[1]}_rewards/soft_format", 0),
+                f"train/{positions[1]}_rewards/xml_count": train_metrics.get(f"{positions[1]}_rewards/xml_count", 0),
+                f"train/{positions[1]}_reward": train_metrics.get(f"{positions[1]}_reward", 0),
+                })
+            
+            # # Add reward metrics if available (including prefixed ones)
+            # for key, value in train_metrics.items():
+            #     if key.startswith('rewards/') or key.startswith('pro_rewards/') or key.startswith('con_rewards/'):
+            #         wandb_log[f"train/{key}"] = value
+            
+            wandb.log(wandb_log)
+
 
         # Add after each major operation in the training loop
         torch.cuda.empty_cache()
