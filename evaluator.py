@@ -173,6 +173,7 @@ class DebateEvaluator(RewardEvaluator):
         wins = torch.zeros((num_completions, num_completions), device=device)
         
         topic = input_prompt['question']
+        self.last_judge_responses = []
         
         # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
@@ -224,6 +225,9 @@ class DebateEvaluator(RewardEvaluator):
                         temperature=0.1
                     )
                     judge_responses.append(response)
+
+            # Store judge responses for logging
+            self.last_judge_responses.extend(judge_responses)
             
             # Process judge responses for completion i
             for j, judge_response in zip(comparison_indices, judge_responses):

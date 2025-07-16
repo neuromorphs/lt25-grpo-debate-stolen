@@ -384,19 +384,21 @@ def score_contrastive_completions(
     data_map = ((completions_text, rewards_per_func, ""), 
                 (completions_text_2, rewards_per_func_2, "_2"))
 
-    for _, (completions, rewards_per_func, suffix) in enumerate(data_map):
+    for i, (completions, rewards_per_func, suffix) in enumerate(data_map):
         rewards = rewards_per_func.sum(dim=1)
-        log_data[f'generations{suffix}'] = [{
-            'response': comp,
-            'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
-        } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
-
-
-        # Log judge response for this specific comparison
-        if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
-            generation_data['judge_response'] = eval_class.last_judge_responses[i]
-
-        log_data[f'generations{suffix}'].append(generation_data)
+        log_data[f'generations{suffix}'] = []
+        
+        for j, (comp, scores) in enumerate(zip(completions, rewards_per_func)):
+            generation_data = {
+                'response': comp,
+                'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[j].item()}
+            }
+            
+            # Log judge response for this specific comparison
+            if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and j < len(eval_class.last_judge_responses):
+                generation_data['judge_response'] = eval_class.last_judge_responses[j]
+            
+            log_data[f'generations{suffix}'].append(generation_data)
 
     truth_metrics={'train/truth_win_rate': rewards_per_func[:, 0].mean().item()/1.5}
 
@@ -481,7 +483,7 @@ def compute_contrastive_loss(
     print(f"response length 2: {response_length_2}")
     # print(f"CON PER TOKEN KL: {per_token_kl_2}")
     metrics["response_length_2"] = response_length_2
-    mean_kl_2 = ((intermediary['per_token_kl'] * completion_mask_2).sum(dim=1) / completion_mask_2.sum(dim=1)).mean()
+    mean_kl_2 = ((intermediary_2['per_token_kl'] * completion_mask_2).sum(dim=1) / completion_mask_2.sum(dim=1)).mean()
     print(f"mean KL 2: {mean_kl_2}")
     metrics["kl_2"] = mean_kl_2.item()
     
