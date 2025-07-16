@@ -5,6 +5,7 @@ import os
 import json
 import torch
 import argparse
+import wandb
 from tqdm import tqdm
 from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
@@ -187,6 +188,20 @@ def eval_on_test_set(
     metrics_path = os.path.join(args.output_dir, f'eval_metrics_{round_num}.json')
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=4)
+
+    # Log evaluation metrics to wandb
+    if args.use_wandb:
+        wandb_eval_metrics = {
+            f"eval/win_rate": win_rate,
+            f"eval/total_wins": total_wins,
+            f"eval/total_comparisons": total_comparisons,
+            f"eval/num_examples": num_examples,
+        }
+        # Add average scores with eval prefix
+        for metric, value in avg_scores.items():
+            wandb_eval_metrics[f"eval/{metric}"] = value
+        
+        wandb.log(wandb_eval_metrics, step=round_num)
 
     return metrics, win_rate
 
@@ -503,6 +518,13 @@ def parse_args():
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
 
+    # Wandb logging parameters
+    parser.add_argument("--use_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="grpo-training", help="Wandb project name")
+    parser.add_argument("--wandb_entity", type=str, default=None, help="Wandb entity (username or team)")
+    parser.add_argument("--wandb_run_name", type=str, default=None, help="Wandb run name")
+    parser.add_argument("--wandb_tags", type=str, nargs="*", default=[], help="Wandb tags for the run")
+
     args = parser.parse_args()
     return args
 
@@ -556,6 +578,22 @@ if __name__ == "__main__":
     os.makedirs(train_log_dir, exist_ok=True)
     checkpoint_dir = os.path.join(args.output_dir, 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
+
+    # Initialize wandb if enabled
+    if args.use_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_run_name,
+            tags=args.wandb_tags,
+            config=args_dict,
+            dir=args.output_dir
+        )
+        # Log model info
+        wandb.config.update({
+            "model_parameters": sum(p.numel() for p in model.parameters()),
+            "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad)
+        })
 
     # Setup optimizer for trainer agent with GRPO config settings
     optimizer = torch.optim.AdamW(
@@ -661,9 +699,22 @@ if __name__ == "__main__":
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), float('inf')).item()
         train_metrics["grad_norm"] = grad_norm
         train_metrics_total[round_num] = train_metrics
+        
+        # Log training metrics to wandb
+        if args.use_wandb:
+            wandb_train_metrics = {}
+            for key, value in train_metrics.items():
+                # Add train prefix to distinguish from eval metrics
+                wandb_train_metrics[f"train/{key}"] = value
+            wandb.log(wandb_train_metrics, step=round_num)
+        
         with open(os.path.join(train_log_dir, "train_logs.json"), "w") as f:
             json.dump(train_metrics_total, f, indent=4)
 
         # Add after each major operation in the training loop
         torch.cuda.empty_cache()
+    
+    # Finish wandb run
+    if args.use_wandb:
+        wandb.finish()
     
