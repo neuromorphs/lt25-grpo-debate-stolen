@@ -9,11 +9,20 @@ from tqdm import tqdm
 from collections import defaultdict
 from transformers import PreTrainedModel, PreTrainedTokenizerBase, GenerationConfig
 from model_interface import ModelInterface
+import random
 
 import llms
 import utils
 import evaluator
 import rldatasets
+
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
+
 
 def eval_on_test_set(
     all_models: dict,
@@ -265,7 +274,122 @@ def generate_completions(
     completions_text = tokenizer.batch_decode(completion_ids, skip_special_tokens=True)
 
     return prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, prompt_text
+
+def compute_contrastive_advantages(
+    rewards: torch.Tensor, rewards_2: torch.Tensor,
+    log_data: dict, metrics:dict
+) -> tuple[torch.Tensor, dict]:
+    mean_grouped_rewards   = rewards.view(-1, args.num_chains).mean(dim=1)
+    mean_grouped_rewards_2 = rewards_2.view(-1, args.num_chains).mean(dim=1)
+    print(f"\nPro rewards: {rewards}")
+    print(f"Con rewards: {rewards_2}")
+    # Repeat mean rewards to match original shape
+    mean_grouped_rewards   = mean_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+    mean_grouped_rewards_2 = mean_grouped_rewards_2.repeat_interleave(args.num_chains, dim=0)   
+    std_grouped_rewards   = rewards.view(-1, args.num_chains).std(dim=1)
+    std_grouped_rewards_2 = rewards_2.view(-1, args.num_chains).std(dim=1)
+    # Repeat std rewards to match original shape
+    std_grouped_rewards   = std_grouped_rewards.repeat_interleave(args.num_chains, dim=0)
+    std_grouped_rewards_2 = std_grouped_rewards_2.repeat_interleave(args.num_chains, dim=0)
+    # Compute advantages
+    advantages   = (rewards   - mean_grouped_rewards  ) / (std_grouped_rewards   + 1e-4)
+    advantages_2 = (rewards_2 - mean_grouped_rewards_2) / (std_grouped_rewards_2 + 1e-4)
+    print(f"advantages: {advantages}")
+    print(f"advantages_2: {advantages_2}")
+
+    metrics["reward_std"] = std_grouped_rewards.mean().item()
+    metrics["reward_std_2"] = std_grouped_rewards_2.mean().item()
+    # print(f"Pro Reward std: {metrics['pro_reward_std']}")
+    # print(f"Con Reward std: {metrics['con_reward_std']}")
+    print(f"Metrics: {metrics}")
+
+    # Store summary statistics
+    log_data['summary_stats'] = {
+        'mean_rewards_per_group': mean_grouped_rewards.tolist(),
+        'std_rewards_per_group': std_grouped_rewards.tolist(),
+        'advantages': advantages.tolist()
+    }
+    log_data['summary_stats_2'] = {
+        'mean_rewards_per_group': mean_grouped_rewards_2.tolist(),
+        'std_rewards_per_group': std_grouped_rewards_2.tolist(),
+        'advantages': advantages_2.tolist()
+    }
+    return advantages, advantages_2, log_data
+
+def score_contrastive_completions(
+    completions_text: list[str],
+    completions_text_2: list[str],
+    input_prompt: str,
+    positions: list[str],
+    eval_class: evaluator.RewardEvaluator,
+    device: str,
+    args: argparse.Namespace
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float], dict]:
+    # Build log data dictionary
+    log_data = {
+        'prompt': {
+            'text': input_prompt['question'],
+        },
+        'pro_generations': [],
+        'con_generations': []
+    }
+
+    # Compute both scenarios and average debate scores
+    scenarios = [(completions_text, completions_text_2, True, 'one_first'), 
+                    (completions_text_2, completions_text, False, 'two_first')]
+
+    rewards_data = {}
+    for train_comps, comp_comps, pro_first, order in scenarios:
+        rewards_per_func, stance_metrics, cross_score = eval_class.compute_rewards(
+            input_prompt=input_prompt, all_models=all_models,
+            train_model_completions=train_comps, compare_model_completions=comp_comps,
+            device=device, is_test=False, pro_first=pro_first
+        )
+        
+        # Store for cross-averaging
+        rewards_data[order] = (rewards_per_func, stance_metrics, cross_score)
+
+    # Average debate scores
+    rewards_per_func,   metrics,   _ = rewards_data['one_first']
+    rewards_per_func_2, metrics_2, _ = rewards_data['two_first']
+
+    if args.dataset_name == "debate_code" and args.truth_optim:
+        win_rate   = (rewards_per_func[:, 0]   + 1 - rewards_data['two_first'][2]) / 2
+        win_rate_2 = (rewards_per_func_2[:, 0] + 1 - rewards_data['one_first'][2]) / 2
+    else:
+        win_rate   = (rewards_per_func[:, 0]   + rewards_data['two_first'][2]) / 2
+        win_rate_2 = (rewards_per_func_2[:, 0] + rewards_data['one_first'][2]) / 2
     
+    rewards_per_func[:, 0]   = (2 * win_rate   - 1) * 1.5 
+    rewards_per_func_2[:, 0] = (2 * win_rate_2 - 1) * 1.5
+
+    # Final data
+    data_map = ((completions_text, rewards_per_func, positions[0]), 
+                (completions_text_2, rewards_per_func_2, positions[1]))
+
+    for _, (completions, rewards_per_func, pos) in enumerate(data_map):
+        rewards = rewards_per_func.sum(dim=1)
+        log_data[f'{pos}_generations'] = [{
+            'response': comp,
+            'scores': {**eval_class.get_reward_breakdown(scores), 'total_reward': rewards[i].item()}
+        } for i, (comp, scores) in enumerate(zip(completions, rewards_per_func))]
+
+    truth_metrics={'train/truth_win_rate': rewards_per_func[:, 0].mean().item()/1.5}
+
+    # modify every key of pro_metrics with a pro_ prefix
+    metrics   = {f'{positions[0]}_{k}': v for k, v in metrics.items()}
+    metrics_2 = {f'{positions[0]}_{k}': v for k, v in metrics_2.items()}
+    metrics = {**metrics, **metrics_2, **truth_metrics}
+    rewards, rewards_2 = rewards_per_func.sum(dim=1), rewards_per_func_2.sum(dim=1)
+
+    # Compute advantages
+    advantages, advantages_2, log_data = compute_contrastive_advantages(
+        rewards, rewards_2, log_data, metrics
+    )
+
+    return rewards, advantages, rewards_per_func, rewards_2, advantages_2, rewards_per_func_2, metrics, log_data
+
+
 def score_completions(
     completions_text: list[str],
     question: str,
@@ -404,6 +528,7 @@ def grpo_loss(
         train_loader,
         all_models: dict,
         question: str,
+        positions: list[str],
         eval_class: evaluator.RewardEvaluator,
         device: str,
         round_num: int,
@@ -431,9 +556,12 @@ def grpo_loss(
         reward: The total reward for this batch
     """
 
+    
+    position_id = 0 if args.dataset_name == "debate_code" else random.choice([0,1]) 
+    
     prompt = [
         {'role': 'system', 'content': test_loader.pre_prompt},
-        {'role': 'user', 'content': question}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[position_id]}"}
     ]
     prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
 
@@ -441,21 +569,38 @@ def grpo_loss(
     prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completions_text, _ = generate_completions(
         all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
     )
-    # Score completions
-    rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
-        completions_text, question, eval_class, device, args
-    )
+
+    if args.contrastive: 
+        raise NotImplementedError("Contrastive training not implemented in this function")
+        prompt_2 = prompt.copy()
+        prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1-position_id]}"
+        prompt_text_2 = all_models["training_model_tokenizer"].apply_chat_template(prompt_2, tokenize=False)
+        prompt_completion_ids_2, prompt_2_ids, completion_ids_2, attention_mask_2, completions_text_2, _ = generate_completions(
+            all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
+        )
+        fixed_positions = [positions[position_id], positions[1-position_id]]
+        rewards, advantages, rewards_per_func, rewards_2, advantages_2, rewards_per_func_2, metrics, log_data = score_contrastive_completions(
+        completions_text, completions_text_2, input_prompt, fixed_positions, eval_class, device, args
+    ) 
+    else: 
+        # Score completions
+        rewards, advantages, rewards_per_func, metrics, log_data = score_completions(
+            completions_text, question, eval_class, device, args
+        )
 
     # Write log data
     log_file = os.path.join(training_log_dir, f'{round_num}_generations.txt')
     utils.write_generation_log(log_data, log_file)
 
     # Compute loss
-    completion_mask = attention_mask[:, prompt_ids.size(1):]
-    loss, loss_metrics = compute_loss(
-        all_models["training_model"], all_models["base_model"], prompt_completion_ids, prompt_ids, completion_ids,
-        attention_mask, completion_mask, advantages, args
-    )
+    if args.contrastive:
+        raise NotImplementedError("Contrastive training not implemented in this function")
+    else:
+        completion_mask = attention_mask[:, prompt_ids.size(1):]
+        loss, loss_metrics = compute_loss(
+            all_models["training_model"], all_models["base_model"], prompt_completion_ids, prompt_ids, completion_ids,
+            attention_mask, completion_mask, advantages, args
+        )
 
     # Combine metrics
     metrics.update(loss_metrics)
@@ -503,13 +648,70 @@ def parse_args():
     parser.add_argument("--kl_weight_beta", type=float, default=0.04, help="KL penalty weight")
     parser.add_argument("--seed", type=int, default=7111994, help="Random seed")
 
-    args = parser.parse_args()
+    # new parameters
+    parser.add_argument("--contrastive_training", type=str, default="false", choices=["true", "false", "True", "False"], help="Whether to use contrastive training (PRO vs CON)")
+    parser.add_argument("--truth_optim", action="store_true", help="Use truth optimization for debate_code")
+    parser.add_argument("--truth_comparison", action="store_true", help="Use truth comparison in the judge prompt")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode for additional logging and checks")
+    parser.add_argument("--enable_wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb_project", type=str, default="grpo-debate", help="Wandb project name")
+    parser.add_argument("--wandb_key_file", type=str, default="wandb_key.txt", help="Path to file containing wandb API key")
+
+
+
     return args
 
 if __name__ == "__main__":
 
     # Get all args 
     args = parse_args() 
+    if args.debate_name == "debate_code" and args.contrastive_training == False:
+        raise ValueError("Contrastive training must be enabled for debate_code dataset")
+
+    if args.enable_wandb and WANDB_AVAILABLE:
+        print("Setting up Weights & Biases logging...")
+        try:
+            # Read wandb key from file
+            if os.path.exists(args.wandb_key_file):
+                print(f"Reading wandb API key from {args.wandb_key_file}")
+                with open(args.wandb_key_file, 'r') as f:
+                    wandb_key = f.read().strip()
+                os.environ['WANDB_API_KEY'] = wandb_key
+                print("✓ API key loaded successfully")
+                
+                # Initialize wandb
+                run_name = f"{args.model_name.split('/')[-1]}_{args.truth_optim}"
+                print(f"Initializing wandb project: {args.wandb_project}")
+                print(f"Run name: {run_name}")
+                
+                wandb.init(
+                    project=args.wandb_project,
+                    name=run_name,
+                    config=vars(args),
+                    resume="allow" if args.resume else None
+                )
+                print("✓ Wandb initialized successfully!")
+                print(f"🔗 View your run at: https://wandb.ai/{wandb.run.entity}/{args.wandb_project}/runs/{wandb.run.id}")
+                
+                if args.enable_detailed_logging:
+                    logger.info(f"Initialized wandb project: {args.wandb_project}, run: {run_name}")
+            else:
+                print(f"❌ Error: Wandb key file {args.wandb_key_file} not found.")
+                print("Please create the file and add your wandb API key to enable logging.")
+                args.enable_wandb = False
+        except Exception as e:
+            print(f"❌ Error: Failed to initialize wandb: {e}")
+            print("Continuing without wandb logging...")
+            args.enable_wandb = False
+    elif args.enable_wandb and not WANDB_AVAILABLE:
+        print("❌ Error: wandb requested but not installed.")
+        print("Install with: pip install wandb")
+        args.enable_wandb = False
+    elif not args.enable_wandb:
+        print("Wandb logging disabled (use --enable_wandb to enable)")
+    else:
+        print("Wandb logging enabled - ERROR")
+
     
     # Seed everything 
     utils.seed_everything(args.seed)
@@ -638,10 +840,10 @@ if __name__ == "__main__":
                     ref_param.data = args.ref_model_mixup_alpha * param.data + (1 - args.ref_model_mixup_alpha) * ref_param.data
 
         # Get next question
-        question = next(train_loader)
+        question, positions = next(train_loader)
 
         # Do GRPO - generate chains, score, compute advantage, compute loss 
-        total_loss, train_metrics = grpo_loss(train_loader, all_models, question, eval_class, device, round_num, train_log_dir, args)
+        total_loss, train_metrics = grpo_loss(train_loader, all_models, question, positions, eval_class, device, round_num, train_log_dir, args)
         
         # Gradient accumulation
         total_loss = total_loss
