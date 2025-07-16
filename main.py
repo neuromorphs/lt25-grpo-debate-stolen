@@ -58,6 +58,11 @@ def eval_on_test_set(
                 {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[id_pos]}"}
             ]
             prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
+            if args.contrastive_eval:
+                prompt_2 = prompt.copy()
+                prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1-id_pos]}"
+                prompt_text_2 = all_models["training_model_tokenizer"].apply_chat_template(prompt_2, tokenize=False)
+
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
@@ -77,7 +82,7 @@ def eval_on_test_set(
             for _ in range(args.num_chains):
                 completion = all_models["compare_model"].generate(
                     system_prompt=test_loader.pre_prompt,
-                    user_prompt=question,
+                    user_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'],
                     max_new_tokens=args.max_completion_length,
                     temperature=args.temperature
                 )
@@ -85,7 +90,7 @@ def eval_on_test_set(
 
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=question, 
+                input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
                 all_models=all_models, 
                 train_model_completions=completions_text, 
                 compare_model_completions=compare_completions_text,
@@ -389,6 +394,86 @@ def score_contrastive_completions(
 
     return rewards, advantages, rewards_per_func, rewards_2, advantages_2, rewards_per_func_2, metrics, log_data
 
+def compute_contrastive_loss(
+    model: PreTrainedModel,
+    base_model: PreTrainedModel,
+    prompt_completion_ids: torch.Tensor,
+    prompt_ids: torch.Tensor,
+    completion_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    completion_mask: torch.Tensor,
+    advantages: torch.Tensor,
+    prompt_completion_ids_2: torch.Tensor,
+    prompt_ids_2: torch.Tensor,
+    completion_ids_2: torch.Tensor,
+    attention_mask_2: torch.Tensor,
+    completion_mask_2: torch.Tensor,
+    advantages_2: torch.Tensor,
+    args: argparse.Namespace
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """
+    Compute the contrastive GRPO loss for cross-comparison setup between PRO and CON stances.
+    
+    Based on Multi-Prompt GRPO from GRPO-README.md, this computes loss for both PRO and CON
+    completions that are scored against each other in cross-comparison.
+    
+    Args:
+        model: The current model being trained
+        base_model: The reference model to compare against
+        prompt_completion_ids: Combined prompt and completion token IDs for PRO stance
+        prompt_ids: Token IDs for just the PRO prompt
+        completion_ids: Token IDs for just the PRO completion
+        attention_mask: Attention mask for the PRO full sequence
+        completion_mask: Mask indicating which tokens are from the PRO completion
+        advantages: Advantage values for each PRO sequence
+        prompt_completion_ids_2: Combined prompt and completion token IDs for CON stance
+        prompt_ids_2: Token IDs for just the CON prompt
+        completion_ids_2: Token IDs for just the CON completion
+        attention_mask_2: Attention mask for the CON full sequence
+        completion_mask_2: Mask indicating which tokens are from the CON completion
+        advantages_2: Advantage values for each CON sequence
+        args: Training arguments
+        
+    Returns:
+        loss: The computed contrastive GRPO loss (sum of PRO and CON losses)
+        metrics: Dictionary containing additional metrics like KL divergence for both stances
+    """
+    
+    loss, metrics, intermediary = compute_loss(model, base_model, prompt_completion_ids, prompt_ids, completion_ids, attention_mask, completion_mask, advantages, args)
+    loss_2, metrics_2, intermediary_2 = compute_loss(model, base_model, prompt_completion_ids_2, prompt_ids_2, completion_ids_2, attention_mask_2, completion_mask_2, advantages_2, args)
+        
+    # Combined loss as sum over both prompt groups (following Multi-Prompt GRPO formula)
+    total_loss = loss + loss_2
+    
+    # Additional metrics
+    metrics = {}
+    
+    # PRO stance metrics
+    response_length = completion_mask.sum(1).float().mean().item()
+    print(f"response length: {response_length}")
+    # print(f"PRO PER TOKEN KL: {per_token_kl}")
+    metrics["response_length"] = response_length
+    mean_kl = ((intermediary['per_token_kl'] * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
+    print(f"PRO mean KL: {mean_kl}")
+    metrics["kl"] = mean_kl.item()
+    
+    # CON stance metrics  
+    response_length_2 = completion_mask_2.sum(1).float().mean().item()
+    print(f"response length 2: {response_length_2}")
+    # print(f"CON PER TOKEN KL: {per_token_kl_2}")
+    metrics["response_length_2"] = response_length_2
+    mean_kl_2 = ((intermediary['per_token_kl'] * completion_mask_2).sum(dim=1) / completion_mask_2.sum(dim=1)).mean()
+    print(f"mean KL 2: {mean_kl_2}")
+    metrics["kl_2"] = mean_kl_2.item()
+    
+    # Combined metrics
+    metrics["mean_response_length"] = (response_length + response_length_2) / 2
+    metrics["mean_kl"] = (mean_kl + mean_kl_2).item() / 2
+    metrics["loss"] = loss.item()
+    metrics["loss_2"] = loss_2.item()
+    
+    return total_loss, metrics
+
 
 def score_completions(
     completions_text: list[str],
@@ -526,7 +611,7 @@ def compute_loss(
     mean_kl = ((per_token_kl * completion_mask).sum(dim=1) / completion_mask.sum(dim=1)).mean()
     metrics["kl"] = mean_kl.item()
 
-    return loss, metrics
+    return loss, metrics, {'per_token_kl': per_token_kl, 'response_length': response_length, 'mean_kl': mean_kl}
 
 def grpo_loss(
         train_loader,
@@ -600,7 +685,7 @@ def grpo_loss(
         raise NotImplementedError("Contrastive training not implemented in this function")
     else:
         completion_mask = attention_mask[:, prompt_ids.size(1):]
-        loss, loss_metrics = compute_loss(
+        loss, loss_metrics, _ = compute_loss(
             all_models["training_model"], all_models["base_model"], prompt_completion_ids, prompt_ids, completion_ids,
             attention_mask, completion_mask, advantages, args
         )

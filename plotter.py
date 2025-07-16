@@ -20,6 +20,11 @@ def plot_metrics(output_dir):
     if output_dir is None:
         raise ValueError("output_dir must be specified")
 
+    # Load configuration
+    args_path = os.path.join(output_dir, 'args.json')
+    with open(args_path, 'r') as f:
+        args = json.load(f)
+
     # Load training logs
     train_logs_path = os.path.join(output_dir, 'training_logs', 'train_logs.json')
     with open(train_logs_path, 'r') as f:
@@ -109,7 +114,14 @@ def plot_metrics(output_dir):
                 plt.plot(eval_steps, metric_values, color='#2ecc71', linewidth=2.0, label='Win Rate')
                 plt.xlabel('Training Steps', fontsize=12)
                 plt.ylabel('Win Rate (%)', fontsize=12)
-                plt.title('Chopped Test Set Debate Win Rate (Qwen 2.5-7B vs GPT-4)', fontsize=24, pad=20)
+                
+                # Generate dynamic title based on configuration
+                model_name = args['model_name'].split('/')[-1]  # Extract model name without org
+                compare_model = args['compare_model_name'].split('/')[-1]
+                dataset_name = args['dataset_name'].title()
+                title = f'{dataset_name} Test Set Win Rate ({model_name} vs {compare_model})'
+                plt.title(title, fontsize=14, pad=20)
+                
                 plt.grid(True, alpha=0.3)
                 plt.legend()
                 pdf.savefig(bbox_inches='tight')
