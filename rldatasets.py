@@ -120,7 +120,7 @@ class DebateDataLoader(DataLoader):
         self.current_index = 0
 
 
-def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
+def build_debate_dataloaders(debug: bool = True) -> Tuple[DebateDataLoader, DebateDataLoader]:
     # Define debate topics - non-controversial but engaging topics
     topics = [
         "Video games should be taught as a school sport",
@@ -176,7 +176,7 @@ def build_debate_dataloaders() -> Tuple[DebateDataLoader, DebateDataLoader]:
     ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = int(total_topics * 0.15)
+    test_size = 1 if debug else int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
@@ -455,7 +455,7 @@ def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
     return trainloader, testloader
 
 
-def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
+def get_dataloaders(dataset_name: str, debug: bool = False) -> Tuple[DataLoader, DataLoader]:
     """
     Factory function to get train and test data loaders for a specified dataset.
     
@@ -469,7 +469,7 @@ def get_dataloaders(dataset_name: str) -> Tuple[DataLoader, DataLoader]:
         ValueError: If dataset_name is not supported
     """
     if dataset_name.lower() == 'debate':
-        return build_debate_dataloaders()
+        return build_debate_dataloaders(debug)
     elif dataset_name.lower() == 'ld':
         return build_ld_dataloaders()
     elif dataset_name.lower() == 'chopped':

@@ -174,10 +174,15 @@ class DebateEvaluator(RewardEvaluator):
         wins = torch.zeros(num_completions, device=device)
         losses = torch.zeros(num_completions, device=device)
         
+        topic = input_prompt['question']
         # Get debate scores using round-robin tournament
+        # Batch the inner loop for each completion
         for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
+            # Collect all comparisons for completion i
+            judge_prompts = []
+            comparison_indices = []
+            
             for j in range(i + 1, num_completions):
-                topic = input_prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
                 response1 = self._extract_xml_answer(train_model_completions[i])
                 response2 = self._extract_xml_answer(train_model_completions[j])
                 
@@ -187,13 +192,36 @@ class DebateEvaluator(RewardEvaluator):
                     arg2_response=response2
                 )
                 
-                # Get judge's decision using the interface
-                judge_response = all_models["judge_model"].generate(
+                judge_prompts.append(judge_prompt)
+                comparison_indices.append(j)
+            
+            # Skip if no comparisons for this completion
+            if not judge_prompts:
+                continue
+            
+            # Batch evaluate all comparisons for completion i
+            if hasattr(all_models["judge_model"], 'generate_batch_prompts'):
+                judge_responses = all_models["judge_model"].generate_batch_prompts(
                     system_prompt="You are an impartial debate judge.",
-                    user_prompt=judge_prompt,
+                    user_prompts=judge_prompts,
                     max_new_tokens=50,
                     temperature=0.1
-                ).strip().upper()
+                )
+            else:
+                # Fallback to sequential evaluation
+                judge_responses = []
+                for judge_prompt in judge_prompts:
+                    response = all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=50,
+                        temperature=0.1
+                    )
+                    judge_responses.append(response)
+            
+            # Process judge responses for completion i
+            for j, judge_response in zip(comparison_indices, judge_responses):
+                judge_response = judge_response.strip().upper()
                 
                 if "ARGUMENT_1_WINS" in judge_response:
                     wins[i] += 1
