@@ -80,14 +80,25 @@ def eval_on_test_set(
                 all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
             )
 
-            # Generate completions for compare model using the interface
-            compare_completions_text = all_models["compare_model"].generate_batch(
-                system_prompt=test_loader.pre_prompt,
-                user_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'],
-                num_completions=args.num_chains,
-                max_new_tokens=args.max_completion_length,
-                temperature=args.temperature
-            )
+            # # Generate completions for compare model using the interface
+            # compare_completions_text = all_models["compare_model"].generate_batch(
+            #     system_prompt=test_loader.pre_prompt,
+            #     user_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'],
+            #     num_completions=args.num_chains,
+            #     max_new_tokens=args.max_completion_length,
+            #     temperature=args.temperature
+            # )
+            compare_promt = prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content']
+            compare_completions_text = []
+            for _ in range(args.num_chains):
+                completion = all_models["compare_model"].generate(
+                    system_prompt=test_loader.pre_prompt,
+                    user_prompt=compare_promt,
+                    max_new_tokens=args.max_completion_length,
+                    temperature=args.temperature
+                )
+                compare_completions_text.append(completion)
+
 
             trained_first = random.choice([True, False]) # Randomly choose which model is first
             trained_first_cnt += 1 if trained_first else 0
@@ -800,6 +811,7 @@ def parse_args():
     
     # Convert string arguments to boolean
     args.contrastive_training = args.contrastive_training.lower() == "true"
+    args.contrastive_eval = args.contrastive_eval.lower() == "true"
 
     return args
 
