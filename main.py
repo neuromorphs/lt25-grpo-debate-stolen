@@ -101,7 +101,7 @@ def eval_on_test_set(
                 compare_model_completions=arg2,
                 device=device,
                 is_test=True, 
-                constrative=args.contrastive_eval,
+                contrastive=args.contrastive_eval,
             )
             
             # Track total comparisons and wins
@@ -944,7 +944,7 @@ if __name__ == "__main__":
         print(f"Round {round_num}")
         if round_num == 0: eval_metrics = {}
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations == 0 and round_num > 0: #TODO: eval
+        if round_num % args.eval_iterations == 0: #and round_num > 0: #TODO: eval
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,

@@ -170,7 +170,7 @@ class DebateEvaluator(RewardEvaluator):
         rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
         
         # Track wins/losses for each completion
-        wins = torch.zeros((num_completions, num_completions), device=device)
+        wins_table = torch.zeros((num_completions, num_completions), device=device)
         
         topic = input_prompt['question']
         self.last_judge_responses = []
@@ -235,15 +235,15 @@ class DebateEvaluator(RewardEvaluator):
                 answer_parsed = extract_winner_by_count(judge_response)
 
                 if answer_parsed == "ARGUMENT_1_WINS":
-                    wins[i, j] = 1
+                    wins_table[i, j] = 1
                 
                 # Store judge responses for logging
                 self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
 
         # Calculate normalized scores (-1.5 to 1.5 range)
         total_matches = num_completions  # number of matches per completion
-        wins   = wins.sum(dim=1)  # Wins for PRO model
-        wins_2 = num_completions - wins.sum(dim=0)  # Wins for CON model
+        wins   = wins_table.sum(dim=1)  # Wins for PRO model
+        wins_2 = num_completions - wins_table.sum(dim=0)  # Wins for CON model
         win_rate   = wins   / total_matches
         win_rate_2 = wins_2 / total_matches
 
