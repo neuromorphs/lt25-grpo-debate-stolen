@@ -35,6 +35,110 @@ class HuggingFaceModel(ModelInterface):
         self.tokenizer = tokenizer
         self.device = device
         
+    def generate_batch(self, system_prompt: str, user_prompt: str, num_completions: int, **kwargs) -> List[str]:
+        """
+        Generate multiple completions efficiently using batching.
+        
+        Args:
+            system_prompt: The system prompt/instructions
+            user_prompt: The user's input prompt
+            num_completions: Number of completions to generate
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            List[str]: List of generated completions
+        """
+        # Format prompt in chat template
+        prompt = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ]
+        prompt_text = self.tokenizer.apply_chat_template(prompt, tokenize=False)
+        
+        # Tokenize
+        inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left"
+        ).to(self.device)
+        
+        # Repeat inputs for batch generation (same as generate_completions)
+        input_ids = inputs["input_ids"].repeat(num_completions, 1)
+        attention_mask = inputs["attention_mask"].repeat(num_completions, 1)
+        
+        # Generate batch
+        outputs = self.model.generate(
+            input_ids,
+            attention_mask=attention_mask,
+            **kwargs
+        )
+        
+        # Decode only the new tokens for each completion
+        prompt_length = input_ids.size(1)
+        completions = []
+        for i in range(num_completions):
+            response = self.tokenizer.decode(
+                outputs[i, prompt_length:],
+                skip_special_tokens=True
+            )
+            completions.append(response.strip())
+        
+        return completions
+        
+    def generate_batch_prompts(self, system_prompt: str, user_prompts: List[str], **kwargs) -> List[str]:
+        """
+        Generate completions for multiple different prompts efficiently using batching.
+        
+        Args:
+            system_prompt: The system prompt/instructions (same for all)
+            user_prompts: List of different user prompts
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            List[str]: List of generated completions (one per prompt)
+        """
+        if not user_prompts:
+            return []
+            
+        # Format all prompts in chat template
+        formatted_prompts = []
+        for user_prompt in user_prompts:
+            prompt = [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt}
+            ]
+            prompt_text = self.tokenizer.apply_chat_template(prompt, tokenize=False)
+            formatted_prompts.append(prompt_text)
+        
+        # Tokenize all prompts with padding
+        inputs = self.tokenizer(
+            formatted_prompts,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left",
+            truncation=True
+        ).to(self.device)
+        
+        # Generate batch
+        outputs = self.model.generate(
+            inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            **kwargs
+        )
+        
+        # Decode only the new tokens for each completion
+        prompt_lengths = inputs["attention_mask"].sum(dim=1)  # Get actual prompt length for each
+        completions = []
+        for i, prompt_length in enumerate(prompt_lengths):
+            response = self.tokenizer.decode(
+                outputs[i, prompt_length:],
+                skip_special_tokens=True
+            )
+            completions.append(response.strip())
+        
+        return completions
+        
     def generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
         # Format prompt in chat template
         prompt = [
