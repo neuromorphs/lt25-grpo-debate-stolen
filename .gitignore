@@ -1,3 +1,7 @@
+# project-specific
+output/
+debate_test/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
