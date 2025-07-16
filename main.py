@@ -92,7 +92,7 @@ def eval_on_test_set(
                 device=device,
                 is_test=True
             )
-
+            
             # Track total comparisons and wins
             comparisons_this_question = len(completions_text)
             total_comparisons += comparisons_this_question
@@ -137,6 +137,10 @@ def eval_on_test_set(
                 for reward_name, reward_value in reward_breakdown.items():
                     f.write(f"{reward_name}: {reward_value:.4f}\n")
                 f.write(f"Total reward: {rewards_per_func[i].sum().item():.4f}\n")
+
+                # Log judge response for this specific comparison
+                if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
+                    f.write(f"\nJUDGE RESPONSE:\n{eval_class.last_judge_responses[i]}\n")
 
                 # Log if trained model won this comparison
                 trained_model_won = rewards_per_func[i,0] > 0
@@ -448,7 +452,13 @@ def score_completions(
                 **eval_class.get_reward_breakdown(reward_scores),
                 'total_reward': rewards[i].item()
             }
+            
         }
+        
+        # Log judge response for this specific comparison
+        if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
+            generation_data['judge_response'] = eval_class.last_judge_responses[i]
+            
         log_data['generations'].append(generation_data)
 
     # Compute advantages
