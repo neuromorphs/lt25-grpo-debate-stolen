@@ -676,6 +676,7 @@ def grpo_loss(
     )
     input_prompt = {
         'question': question,
+        'positions': positions,
     }
     if args.contrastive_training: 
         # raise NotImplementedError("Contrastive training not implemented in this function")
@@ -919,7 +920,7 @@ if __name__ == "__main__":
     for round_num in tqdm(range(start_round, args.num_train_iters), desc="Training Progress"): #TLOOP
         print(f"Round {round_num}")
         # Evaluate on test set every so often 
-        if round_num % args.eval_iterations == 0 and args.eval_iterations > 0: #TODO: eval
+        if round_num % args.eval_iterations == 0 and round_num > 0: #TODO: eval
             eval_metrics, eval_accuracy = eval_on_test_set(
                 all_models=all_models,
                 test_loader=test_loader,

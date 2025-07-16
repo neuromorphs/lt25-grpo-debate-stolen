@@ -184,16 +184,12 @@ class DebateEvaluator(RewardEvaluator):
                 response1 = self._extract_xml_answer(model_completions[i])
                 response2 = self._extract_xml_answer(model_completions_2[j])
                 
-                if self.contrastive:
-                    if one_first:
-                        response1 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response1
-                        response2 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response2
-                    else:
-                        response1 = 'defending the answer ' + input_prompt['con_position'] + ':\n' + response1
-                        response2 = 'defending the answer ' + input_prompt['pro_position'] + ':\n' + response2
+                if one_first:
+                    response1 = 'defending the answer ' + input_prompt['positions'][0] + ':\n' + response1
+                    response2 = 'defending the answer ' + input_prompt['positions'][1] + ':\n' + response2
                 else:
-                    response1 = ':\n' + response1
-                    response2 = ':\n' + response2
+                    response1 = 'defending the answer ' + input_prompt['positions'][1] + ':\n' + response1
+                    response2 = 'defending the answer ' + input_prompt['positions'][0] + ':\n' + response2
 
                 judge_prompt = self.judge_prompt.format(
                     debate_mode=self.debate_modes[1],  # Opposite sides
