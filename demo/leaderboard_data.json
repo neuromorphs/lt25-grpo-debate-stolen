@@ -1,0 +1,43 @@
+{
+  "players": {
+    "steve": {
+      "name": "steve",
+      "total_debates": 1,
+      "wins": 0,
+      "losses": 1,
+      "win_rate": 0.0,
+      "avg_format_score": 0.7,
+      "total_format_score": 0.7,
+      "last_active": "2025-07-17T00:06:18.290791",
+      "rounds_history": [
+        {
+          "topic": "Schools should teach basic coding",
+          "stance": "PRO",
+          "won": false,
+          "format_score": 0.7,
+          "timestamp": "2025-07-17T00:06:18.290791"
+        }
+      ]
+    }
+  },
+  "ai_baseline": {
+    "name": "AI Baseline",
+    "total_debates": 1,
+    "wins": 1,
+    "losses": 0,
+    "win_rate": 1.0,
+    "avg_format_score": 0.8999999999999999,
+    "total_format_score": 0.8999999999999999,
+    "last_active": "2025-07-17T00:06:18.290831",
+    "rounds_history": [
+      {
+        "topic": "Schools should teach basic coding",
+        "stance": "PRO",
+        "won": true,
+        "format_score": 0.8999999999999999,
+        "timestamp": "2025-07-17T00:06:18.290831"
+      }
+    ]
+  },
+  "last_updated": "2025-07-17T00:06:18.291068"
+}
