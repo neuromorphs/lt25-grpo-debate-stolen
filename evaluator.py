@@ -81,10 +81,6 @@ def get_evaluator(name: str) -> RewardEvaluator:
     """
     if name.lower() == "debate":
         return DebateEvaluator()
-    elif name.lower() == "ld":
-        return LDEvaluator()
-    elif name.lower() == "chopped":
-        return ChoppedEvaluator()
     else:
         raise NotImplementedError(f"No evaluator implemented for {name}")
 
