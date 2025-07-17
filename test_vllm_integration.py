@@ -70,7 +70,7 @@ def test_vllm_model(model_name: str = "microsoft/DialoGPT-small"):
         allocated, total = get_gpu_memory_info()
         available = total - allocated
         safety_margin = 0.5
-        vllm_util = max(0.1, (model_size / available) * (1 + safety_margin))
+        vllm_util = (model_size / available) * (1 + safety_margin)
         print(f"Using vLLM memory utilization: {vllm_util:.2f}")
         
         # Initialize vLLM model with memory constraint
