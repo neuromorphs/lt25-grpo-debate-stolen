@@ -11,12 +11,6 @@ graph TB
     U1[User 1] --> SG
     U2[...] --> SG
     UN[User N] --> SG
-
-    style VLM fill:#e1f5fe
-    style GS fill:#e8f5e8
-    style LG fill:#fff3e0
-    style SG fill:#fce4ec
-    style CSV fill:#f3e5f5
 ```
 
 # Inference Setup with vLLM
