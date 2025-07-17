@@ -9,6 +9,12 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+
 class ModelInterface(ABC):
     """Abstract base class for language model interfaces."""
     
@@ -34,8 +40,11 @@ class HuggingFaceModel(ModelInterface):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
-        
+
     def generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
+        return self._generate(system_prompt, user_prompt, **kwargs)
+    
+    def _generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
         # Format prompt in chat template
         prompt = [
             {'role': 'system', 'content': system_prompt},
@@ -122,4 +131,41 @@ class AnthropicModel(ModelInterface):
                 {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
             ]
         )
-        return response.content[0].text.strip() 
+        return response.content[0].text.strip()
+
+class VLLMModel(ModelInterface):
+    """Implementation of ModelInterface for vLLM models with memory management."""
+    
+    def __init__(self, model_name: str, gpu_memory_utilization: float = 0.5, **kwargs):
+        if not VLLM_AVAILABLE:
+            raise ImportError("vLLM is not installed. Install with: pip install vllm")
+        
+        self.model_name = model_name
+        self.gpu_memory_utilization = gpu_memory_utilization
+        
+        # Initialize vLLM with memory constraints
+        self.llm = LLM(
+            model=model_name,
+            gpu_memory_utilization=gpu_memory_utilization,
+            **kwargs
+        )
+    
+    def generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
+        # Convert HF-style parameters to vLLM SamplingParams
+        sampling_params = SamplingParams(
+            temperature=kwargs.get('temperature', 0.7),
+            top_p=kwargs.get('top_p', 0.9),
+            max_tokens=kwargs.get('max_new_tokens', 512),
+            stop=kwargs.get('stop_sequences', None)
+        )
+        
+        # Format as chat messages
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # Generate response
+        outputs = self.llm.chat(messages, sampling_params)
+        
+        return outputs[0].outputs[0].text.strip()
