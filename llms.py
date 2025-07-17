@@ -1,6 +1,13 @@
 """
 Module for loading LLMs and their tokenizers from huggingface. 
 
+vllm gives a ~3x speedup:
+    without vllm:
+        5m5s for testing
+        3m19s for training 4 rounds
+    with vllm:
+        1m44s for testing
+        1m02s for training 4 rounds
 """
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase
@@ -72,7 +79,8 @@ def get_judge_model(model_name: str, device: str) -> ModelInterface:
             return AnthropicModel(model_name)
     elif VLLM_AVAILABLE and model_name in vllm_model_lookup:
         rel_memory = calculate_relative_memory(model_name)
-        return VLLMModel(model_name, rel_memory)
+        kwargs = dict(gpu_memory_utilization=rel_memory, max_model_len=1024)
+        return VLLMModel(model_name, **kwargs)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
         return HuggingFaceModel(model, tokenizer, device)
@@ -95,7 +103,8 @@ def get_compare_model(model_name: str, device: str) -> ModelInterface:
             return AnthropicModel(model_name)
     elif VLLM_AVAILABLE and model_name in vllm_model_lookup:
         rel_memory = calculate_relative_memory(model_name)
-        return VLLMModel(model_name, rel_memory)
+        kwargs = dict(gpu_memory_utilization=rel_memory, max_model_len=1024)
+        return VLLMModel(model_name, **kwargs)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
         return HuggingFaceModel(model, tokenizer, device)
