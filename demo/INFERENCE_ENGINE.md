@@ -3,18 +3,18 @@
 ```mermaid
 graph TB
     VLM[VLM Server] --> GS[Gradio Server]
-    
+
     GS -.-> VPN[Intel VPN]
     VPN -.-> Internet[Internet]
-    
+
     Internet --> LG[Leaderboard Gradio]
     LG --> CSV[Responses.csv]
     CSV --> SG[Submit Gradio]
-    
+
     U1[User 1] --> SG
     U2[...] --> SG
     UN[User N] --> SG
-    
+
     style VLM fill:#e1f5fe
     style GS fill:#e8f5e8
     style LG fill:#fff3e0
