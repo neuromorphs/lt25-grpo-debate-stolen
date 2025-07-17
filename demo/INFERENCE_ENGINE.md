@@ -4,12 +4,9 @@
 graph TB
     VLM[VLM Server] --> GS[Gradio Server]
 
-    GS -.-> VPN[Intel VPN]
-    VPN -.-> Internet[Internet]
-
-    Internet --> LG[Leaderboard Gradio]
-    LG --> CSV[Responses.csv]
-    CSV --> SG[Submit Gradio]
+    GS -.->|Internet| LG[Leaderboard Gradio]
+    CSV[Responses.csv] --> LG
+    SG[Submit Gradio] --> CSV
 
     U1[User 1] --> SG
     U2[...] --> SG
