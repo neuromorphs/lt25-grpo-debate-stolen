@@ -9,11 +9,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=14
 
-set -x
-
-NO_PROXY=127.0.0.1 nohup python inference_server.py > gradio.log 2>&1 &
-
-sleep 10
+set +x
 
 vllm serve Qwen/Qwen2.5-1.5B-Instruct \
   --task generate \

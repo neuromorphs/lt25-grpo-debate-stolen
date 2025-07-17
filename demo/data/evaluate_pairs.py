@@ -2,13 +2,14 @@ import pandas as pd
 import itertools
 import argparse
 import numpy as np
-from gradio_client import Client
+import requests
+import json
 
 def load_template():
     with open('judge_prompt.txt', 'r') as f:
         return f.read().strip()
 
-def evaluate_pair(client, template, response1, response2, topic="General"):
+def evaluate_pair(base_url, template, response1, response2, topic="General", model_name=None):
     prompt = template.format(
         debate_mode="PRO",
         topic=topic,
@@ -16,15 +17,41 @@ def evaluate_pair(client, template, response1, response2, topic="General"):
         arg2_response=response2
     )
     
+    url = f"{base_url}/v1/chat/completions"
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 1024,
+        "stream": False
+    }
+    
+    if model_name:
+        payload["model"] = model_name
+    
     try:
         print(prompt)
-        result = client.predict(
-            message=prompt,
-            api_name="/chat_function"
-        )
-        return result.strip()
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        return result["choices"][0]["message"]["content"].strip()
+    except requests.exceptions.RequestException as e:
+        print(f"Request error evaluating pair: {e}")
+        return None
+    except KeyError as e:
+        print(f"Error parsing response: {e}")
+        return None
     except Exception as e:
-        print(f"Error evaluating pair: {e}")
+        print(f"Unexpected error evaluating pair: {e}")
         return None
 
 def calculate_elo_ratings(win_matrix, usernames, initial_rating=1000, k_factor=32):
@@ -50,8 +77,7 @@ def calculate_elo_ratings(win_matrix, usernames, initial_rating=1000, k_factor=3
     
     return ratings
 
-def calculate_win_rates_and_elo(df, topic):
-    client = Client("https://7064048a4490f5e9cb.gradio.live")
+def calculate_win_rates_and_elo(df, topic, base_url, model_name=None):
     template = load_template()
     
     # Get all unique responses
@@ -77,7 +103,7 @@ def calculate_win_rates_and_elo(df, topic):
         idx1 = username_to_idx[username1]
         idx2 = username_to_idx[username2]
         
-        result = evaluate_pair(client, template, response1, response2, topic)
+        result = evaluate_pair(base_url, template, response1, response2, topic, model_name)
         print(result)
         
         if result == "ARGUMENT_1_WINS":
@@ -153,7 +179,7 @@ def display_leaderboard(elo_ratings, win_rates, win_matrix, usernames):
                 print(f"{win_matrix[i][j]:<9}", end="")
         print()
 
-def main(question_id):
+def main(question_id, base_url, model_name=None):
     # Load question topic
     topic = load_question_topic(question_id)
     
@@ -162,7 +188,7 @@ def main(question_id):
     df = pd.read_csv(csv_filename)
     
     # Calculate win rates and ELO ratings
-    win_rates, elo_ratings, win_matrix, unique_usernames = calculate_win_rates_and_elo(df, topic)
+    win_rates, elo_ratings, win_matrix, unique_usernames = calculate_win_rates_and_elo(df, topic, base_url, model_name)
     
     # Add win_rate and elo_rating columns
     df['win_rate'] = df['username'].map(win_rates)
@@ -179,5 +205,7 @@ def main(question_id):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Evaluate debate responses')
     parser.add_argument('question_id', type=int, help='Question ID to evaluate')
+    parser.add_argument('--vllm-url', required=True, help='vLLM server URL (e.g., http://localhost:8000)')
+    parser.add_argument('--model', help='Model name (optional)')
     args = parser.parse_args()
-    main(args.question_id)
+    main(args.question_id, args.vllm_url, args.model)

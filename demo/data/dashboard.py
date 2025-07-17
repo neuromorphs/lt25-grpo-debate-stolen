@@ -178,14 +178,14 @@ if __name__ == "__main__":
     if mode == "submission":
         from submission_dashboard import create_submission_dashboard
         demo = create_submission_dashboard(question_id)
-        demo.launch(share=True, server_port=7514)
+        demo.launch(server_name="127.0.0.1", share=True, server_port=7514)
     elif mode == "leaderboard":
         from leaderboard_dashboard import create_leaderboard_dashboard
         demo = create_leaderboard_dashboard(question_id)
-        demo.launch(share=True, server_port=7515)
+        demo.launch(server_name="127.0.0.1", share=True, server_port=7515)
     elif mode == "combined":
         demo = create_dashboard(question_id)
-        demo.launch(share=True, server_port=7513)
+        demo.launch(server_name="127.0.0.1", share=True, server_port=7513)
     else:
         print("Invalid mode. Use 'combined', 'submission', or 'leaderboard'")
         sys.exit(1)

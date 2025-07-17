@@ -1,32 +1,35 @@
-# Demo Architecture
-
-```mermaid
-graph TB
-    VLM[VLM Server] --> GS[Gradio Server]
-
-    GS -.->|Internet| LG[Leaderboard Gradio]
-    CSV[Responses.csv] --> LG
-    SG[Submit Gradio] --> CSV
-
-    U1[User 1] --> SG
-    U2[...] --> SG
-    UN[User N] --> SG
-```
-
-# Inference Setup with vLLM
+# Setup
 
 On a GPU node, install the dependencies:
 
 ```shell
 uv venv --python 3.12
 source .venv/bin/activate
-uv pip install vllm
+uv pip install vllm gradio requests
 ```
-To serve the model:
+
+# Open House Demo Workflow
+
+1. Launch vLLM server (GPU node)
 
 ```shell
-vllm serve Qwen/Qwen2.5-1.5B-Instruct \
-  --task generate \
-  --model-impl transformers \
-  --host 0.0.0.0
+sbatch run_vllm_server.sh
+```
+
+3. Launch the submission dashboard (CPU node). Convert the Gradio public URL into QR code and paste it into the slides.
+
+```shell
+python dashboard.py 0 submission
+```
+
+4. Launch eval job (CPU node)
+
+```shell
+python evaluate_pairs.py --question_id 0 --vllm-url VLLM_SERVER_ADDRESS
+```
+
+5. Launch leaderboard dashboard (CPU node)
+
+```shell
+python dashboard.py 0 leaderboard
 ```
