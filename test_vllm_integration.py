@@ -139,11 +139,77 @@ def test_vllm_model(model_name: str = "microsoft/DialoGPT-small"):
     except Exception as e:
         print(f"vLLM test failed: {e}")
 
+def test_vllm_batch(model_name: str = "Qwen/Qwen2.5-1.5B-Instruct"):
+    """Test vLLM model with batch generation."""
+    print(f"\n=== vLLM Batch Test ({model_name}) ===")
+    
+    if not VLLM_AVAILABLE:
+        print("vLLM not available, skipping batch test")
+        return
+    
+    try:
+        # Initialize vLLM model
+        allocated, total = get_gpu_memory_info()
+        available = total - allocated
+        model_size = 2.9  # GB
+        safety_margin = 0.5
+        vllm_util = (model_size / available) * (1 + safety_margin)
+        print(f"Using vLLM memory utilization: {vllm_util:.2f}")
+        
+        model = VLLMModel(
+            model_name=model_name,
+            gpu_memory_utilization=vllm_util,
+            max_model_len=1024
+        )
+        
+        # Prepare batch of prompts
+        system_prompts = [
+            "You are a helpful assistant.",
+            "You are a debate judge.",
+            "You are a creative writer."
+        ]
+        
+        user_prompts = [
+            "What is 2+2?",
+            "Which argument is stronger: 'AI is beneficial' or 'AI is dangerous'?",
+            "Write a short story about a robot."
+        ]
+        
+        # Count tokens for each prompt
+        print("\nToken counts:")
+        for i, (sys_prompt, user_prompt) in enumerate(zip(system_prompts, user_prompts)):
+            token_count = count_tokens(sys_prompt, user_prompt, model_name)
+            print(f"Prompt {i+1}: {token_count} tokens")
+        
+        # Generate batch responses
+        print("\nGenerating batch responses...")
+        responses = model.generate_batch(
+            system_prompts=system_prompts,
+            user_prompts=user_prompts,
+            temperature=0.7,
+            max_new_tokens=100
+        )
+        
+        # Display responses
+        print("\nBatch responses:")
+        for i, response in enumerate(responses):
+            print(f"Response {i+1}: {response}")
+            
+        # Monitor memory after batch generation
+        memory_after = monitor_gpu_memory()
+        print(f"\nMemory after batch generation: {memory_after['utilization_percent']:.1f}%")
+        
+    except Exception as e:
+        print(f"vLLM batch test failed: {e}")
+
 if __name__ == "__main__":
     print("vLLM Integration Test")
     print("=" * 50)
     
     # Test vLLM model (uncomment if you have a small model available)
     test_vllm_model("Qwen/Qwen2.5-1.5B-Instruct")
+    
+    # Test vLLM batch generation
+    test_vllm_batch("Qwen/Qwen2.5-1.5B-Instruct")
     
     print("\nTest completed!")

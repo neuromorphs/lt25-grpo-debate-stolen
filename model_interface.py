@@ -32,6 +32,28 @@ class ModelInterface(ABC):
             str: The generated text
         """
         pass
+    
+    def generate_batch(self, system_prompts: List[str], user_prompts: List[str], **kwargs) -> List[str]:
+        """
+        Generate responses for multiple prompts. Default implementation uses sequential generation.
+        
+        Args:
+            system_prompts: List of system prompts/instructions
+            user_prompts: List of user prompts
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            List[str]: List of generated responses in same order as input
+        """
+        if len(system_prompts) != len(user_prompts):
+            raise ValueError("system_prompts and user_prompts must have the same length")
+        
+        responses = []
+        for sys_prompt, user_prompt in zip(system_prompts, user_prompts):
+            response = self.generate(sys_prompt, user_prompt, **kwargs)
+            responses.append(response)
+        
+        return responses
 
 class HuggingFaceModel(ModelInterface):
     """Implementation of ModelInterface for Hugging Face models."""
@@ -166,3 +188,45 @@ class VLLMModel(ModelInterface):
         outputs = self.llm.chat(messages, sampling_params)
         
         return outputs[0].outputs[0].text.strip()
+    
+    def generate_batch(self, system_prompts: List[str], user_prompts: List[str], **kwargs) -> List[str]:
+        """
+        Generate responses for multiple prompts in parallel.
+        
+        Args:
+            system_prompts: List of system prompts/instructions
+            user_prompts: List of user prompts
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            List[str]: List of generated responses in same order as input
+        """
+        if len(system_prompts) != len(user_prompts):
+            raise ValueError("system_prompts and user_prompts must have the same length")
+        
+        # Convert HF-style parameters to vLLM SamplingParams
+        sampling_params = SamplingParams(
+            temperature=kwargs.get('temperature', 0.7),
+            top_p=kwargs.get('top_p', 0.9),
+            max_tokens=kwargs.get('max_new_tokens', 512),
+            stop=kwargs.get('stop_sequences', None)
+        )
+        
+        # Format all prompts as chat messages
+        batch_messages = []
+        for sys_prompt, user_prompt in zip(system_prompts, user_prompts):
+            messages = [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            batch_messages.append(messages)
+        
+        # Generate responses in batch
+        outputs = self.llm.chat(batch_messages, sampling_params)
+        
+        # Extract text responses
+        responses = []
+        for output in outputs:
+            responses.append(output.outputs[0].text.strip())
+        
+        return responses
