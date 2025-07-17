@@ -4,7 +4,21 @@ Module for loading LLMs and their tokenizers from huggingface.
 """
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedModel, PreTrainedTokenizerBase
-from model_interface import ModelInterface, HuggingFaceModel, OpenAIModel, AnthropicModel
+from model_interface import ModelInterface, HuggingFaceModel, OpenAIModel, AnthropicModel, VLLMModel, VLLM_AVAILABLE
+
+
+vllm_model_lookup = {
+    "Qwen/Qwen2.5-1.5B-Instruct": 2.9*1.5,
+}
+
+
+def calculate_relative_memory(model_name: str):
+    """Get current GPU memory usage in GB."""
+    if not torch.cuda.is_available():
+        return None
+    total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    memory_requirement = vllm_model_lookup[model_name]
+    return memory_requirement / total_memory
 
 
 def get_llm_tokenizer(model_name: str, device: str) -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
@@ -56,6 +70,9 @@ def get_judge_model(model_name: str, device: str) -> ModelInterface:
             return OpenAIModel(model_name)
         else:
             return AnthropicModel(model_name)
+    elif VLLM_AVAILABLE and model_name in vllm_model_lookup:
+        rel_memory = calculate_relative_memory(model_name)
+        return VLLMModel(model_name, rel_memory)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
         return HuggingFaceModel(model, tokenizer, device)
@@ -76,6 +93,9 @@ def get_compare_model(model_name: str, device: str) -> ModelInterface:
             return OpenAIModel(model_name)
         else:
             return AnthropicModel(model_name)
+    elif VLLM_AVAILABLE and model_name in vllm_model_lookup:
+        rel_memory = calculate_relative_memory(model_name)
+        return VLLMModel(model_name, rel_memory)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
         return HuggingFaceModel(model, tokenizer, device)

@@ -42,9 +42,6 @@ class HuggingFaceModel(ModelInterface):
         self.device = device
 
     def generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
-        return self._generate(system_prompt, user_prompt, **kwargs)
-    
-    def _generate(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
         # Format prompt in chat template
         prompt = [
             {'role': 'system', 'content': system_prompt},
