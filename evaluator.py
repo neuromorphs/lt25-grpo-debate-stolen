@@ -84,7 +84,29 @@ def get_evaluator(name: str) -> RewardEvaluator:
     else:
         raise NotImplementedError(f"No evaluator implemented for {name}")
 
+JUDGE_PROMPT="""You are an impartial debate judge. You will be shown two debate responses on the same topic, 
+arguing {debate_mode}. You must judge the arguments **solely on their content and merit**. Do not favor an argument based on its order (1 or 2).
+Your task is to determine which argument was more compelling based on:
+1. Logical reasoning and evidence
+2. Clear structure and organization
+3. Effective use of examples
+4. Respectful tone
+5. Addressing potential counterarguments
 
+Topic: {topic}
+
+Argument 1:
+{arg1_response}
+
+Argument 2:
+{arg2_response}
+
+Which response was more compelling? Respond with EXACTLY one of these options:
+- ARGUMENT_1_WINS
+- ARGUMENT_2_WINS
+
+YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED. ONLY RESPOND WITH ARGUMENT_1_WINS OR ARGUMENT_2_WINS.
+"""
 
 class DebateEvaluator(RewardEvaluator):
     """
@@ -96,28 +118,7 @@ class DebateEvaluator(RewardEvaluator):
     def __init__(self):
         self.num_reward_functions = 4  # debate score + 3 format rewards
         self.debate_modes = ['the same side (PRO or CON)', 'opposite sides (PRO vs CON)']
-        self.judge_prompt = """You are an impartial debate judge. You will be shown two debate responses on the same topic, 
-        arguing {debate_mode}. Your task is to determine which argument was more compelling based on:
-        1. Logical reasoning and evidence
-        2. Clear structure and organization
-        3. Effective use of examples
-        4. Respectful tone
-        5. Addressing potential counterarguments
-        
-        Topic: {topic}
-        
-        Argument 1:
-        {arg1_response}
-        
-        Argument 2:
-        {arg2_response}
-        
-        Which response was more compelling? Respond with EXACTLY one of these options:
-        - ARGUMENT_1_WINS
-        - ARGUMENT_2_WINS
-
-        YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED. ONLY RESPOND WITH ARGUMENT_1_WINS OR ARGUMENT_2_WINS.
-        """
+        self.judge_prompt = JUDGE_PROMPT
         
     def _extract_xml_answer(self, text: str) -> str:
         """Extract the answer portion from XML tags."""
@@ -126,7 +127,7 @@ class DebateEvaluator(RewardEvaluator):
             answer = answer.split("</answer>")[0]
             return answer.strip()
         except:
-            return text  # Fallback if format is incorrect
+            return 'ERROR'  # Fallback if format is incorrect
 
     def _strict_format_reward(self, completions) -> List[float]:
         """Reward for strict XML format."""
@@ -148,6 +149,13 @@ class DebateEvaluator(RewardEvaluator):
             if "</reasoning>" in text: count += 0.125
             if "<answer>" in text: count += 0.125
             if "</answer>" in text: count += 0.125
+
+            # Penalize the length of the content inside <answer> tags
+            if "<answer>" in text and "</answer>" in text:
+                content = text.split("<answer>")[-1].split("</answer>")[0].strip()
+                # if len(content) > 1400:
+                #     count -= (0.5 + (len(content) - 1400) / 2800)  # Penalize for excessive length
+                count -= len(content) * 1.5/1400  # Penalize for content length
             
             # Only penalize actual content after final tag
             if "</answer>" in text:
@@ -311,29 +319,38 @@ class DebateEvaluator(RewardEvaluator):
                 response1 = self._extract_xml_answer(train_model_completions[i])
                 response2 = self._extract_xml_answer(train_model_completions[j])
                 
-                judge_prompt = self.judge_prompt.format(
-                    debate_mode=self.debate_modes[0],  # Same side
-                    topic=topic,
-                    arg1_response=response1,
-                    arg2_response=response2
-                )
-                
-                # Get judge's decision using the interface
-                judge_response_full = all_models["judge_model"].generate(
-                    system_prompt="You are an impartial debate judge.",
-                    user_prompt=judge_prompt,
-                    max_new_tokens=50,
-                    temperature=0.1
-                )
-                all_judge_responses.append(judge_response_full)
-                judge_response = judge_response_full.strip().upper()
-                
-                if "ARGUMENT_1_WINS" in judge_response:
-                    wins[i] += 1
-                    losses[j] += 1
-                elif "ARGUMENT_2_WINS" in judge_response:
+                if response1 == 'ERROR':
                     wins[j] += 1
                     losses[i] += 1
+                    continue
+                elif response2 == 'ERROR':
+                    wins[i] += 1
+                    losses[j] += 1
+                    continue
+                else:
+                    judge_prompt = self.judge_prompt.format(
+                        debate_mode=self.debate_modes[0],  # Same side
+                        topic=topic,
+                        arg1_response=response1,
+                        arg2_response=response2
+                    )
+                    
+                    # Get judge's decision using the interface
+                    judge_response_full = all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=50,
+                        temperature=0.1
+                    )
+                    all_judge_responses.append(judge_response_full)
+                    judge_response = judge_response_full.strip().upper()
+                    
+                    if "ARGUMENT_1_WINS" in judge_response:
+                        wins[i] += 1
+                        losses[j] += 1
+                    elif "ARGUMENT_2_WINS" in judge_response:
+                        wins[j] += 1
+                        losses[i] += 1
 
         # wins_2 = torch.zeros(num_completions, device=device)
         # losses_2 = torch.zeros(num_completions, device=device)
@@ -475,31 +492,38 @@ class DebateEvaluator(RewardEvaluator):
             # Get compare model's response
             compare_response = self._extract_xml_answer(compare_model_completions[i])     
 
-            # Format judge prompt
-            judge_prompt = self.judge_prompt.format(
-                debate_mode=self.debate_modes[1] if contrastive else self.debate_modes[0],  # Opposite sides if contrastive
-                topic=topic,
-                arg1_response=trained_response,
-                arg2_response=compare_response
-            )
-        #     judge_prompts.append(judge_prompt)
-            
-        # # Get judge's decision using the interface
-        # judge_responses = all_models["judge_model"].generate_batch_prompts(
-        #     system_prompt="You are an impartial debate judge.",
-        #     user_prompts=judge_prompts,
-        #     max_new_tokens=50,
-        #     temperature=0.1
-        # )
-            judge_response_full = all_models["judge_model"].generate(
-                system_prompt="You are an impartial debate judge.",
-                user_prompt=judge_prompt,
-                max_new_tokens=50,
-                temperature=0.1
-            )
-            all_judge_responses.append(judge_response_full)
-            judge_response = judge_response_full.strip().upper()
-            judge_responses.append(judge_response)
+            if trained_response == 'ERROR':
+                judge_responses.append('ARGUMENT_2_WINS')
+                continue
+            elif compare_response == 'ERROR':
+                judge_responses.append('ARGUMENT_1_WINS')
+                continue
+            else:
+                # Format judge prompt
+                judge_prompt = self.judge_prompt.format(
+                    debate_mode=self.debate_modes[1] if contrastive else self.debate_modes[0],  # Opposite sides if contrastive
+                    topic=topic,
+                    arg1_response=trained_response,
+                    arg2_response=compare_response
+                )
+            #     judge_prompts.append(judge_prompt)
+                
+            # # Get judge's decision using the interface
+            # judge_responses = all_models["judge_model"].generate_batch_prompts(
+            #     system_prompt="You are an impartial debate judge.",
+            #     user_prompts=judge_prompts,
+            #     max_new_tokens=50,
+            #     temperature=0.1
+            # )
+                judge_response_full = all_models["judge_model"].generate(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompt=judge_prompt,
+                    max_new_tokens=50,
+                    temperature=0.1
+                )
+                all_judge_responses.append(judge_response_full)
+                judge_response = judge_response_full.strip().upper()
+                judge_responses.append(judge_response)
 
 
         for i, judge_response in enumerate(judge_responses):

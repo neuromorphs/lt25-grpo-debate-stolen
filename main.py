@@ -99,11 +99,14 @@ def eval_on_test_set(
                 )
                 compare_completions_text.append(completion)
 
-
-            trained_first = random.choice([True, False]) # Randomly choose which model is first
-            trained_first_cnt += 1 if trained_first else 0
-            arg1 = completions_text         if trained_first else compare_completions_text
-            arg2 = compare_completions_text if trained_first else completions_text
+            if args.debug:
+                arg1 = completions_text
+                arg2 = compare_completions_text
+            else: 
+                trained_first = random.choice([True, False]) # Randomly choose which model is first
+                trained_first_cnt += 1 if trained_first else 0
+                arg1 = completions_text         if trained_first else compare_completions_text
+                arg2 = compare_completions_text if trained_first else completions_text
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
                 input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
@@ -114,15 +117,35 @@ def eval_on_test_set(
                 is_test=True, 
                 contrastive=args.contrastive_eval,
             )
+
+            if args.debug:
+                arg1 = compare_completions_text
+                arg2 = completions_text
+                # Score completions to get reward metrics
+                rewards_per_func_2, reward_metrics_2 = eval_class.compute_rewards(
+                    input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
+                    all_models=all_models, 
+                    train_model_completions=arg1, 
+                    compare_model_completions=arg2,
+                    device=device,
+                    is_test=True, 
+                    contrastive=args.contrastive_eval,
+                )
             
             # Track total comparisons and wins
             comparisons_this_question = len(completions_text)
             total_comparisons += comparisons_this_question
-            total_wins += reward_metrics['num_wins']
-            if trained_first:
+            if args.debug:
                 wins_first += reward_metrics['num_wins']
+                wins_second += args.num_chains - reward_metrics_2['num_wins']
+                total_wins += wins_first + wins_second
             else:
-                wins_second += reward_metrics['num_wins']
+                total_wins += reward_metrics['num_wins']
+                if trained_first:
+                    wins_first += reward_metrics['num_wins']
+                else:
+                    wins_second += reward_metrics['num_wins']
+
 
             # For each completion pair, log the results
             for i, (completion, compare_completion) in enumerate(zip(completions_text, compare_completions_text)):
@@ -172,6 +195,24 @@ def eval_on_test_set(
                 trained_model_won = rewards_per_func[i,0] > 0
                 f.write(f"\nOUTCOME: Trained model {'won' if trained_model_won else 'lost'} this comparison\n")
                 f.write("-"*40 + "\n")
+                
+                if args.debug:
+                    # Log reward scores for this completion
+                    f.write("REWARD SCORES WHEN SECOND:\n")
+                    reward_breakdown_2 = eval_class.get_reward_breakdown(rewards_per_func_2[i])
+                    for reward_name, reward_value in reward_breakdown_2.items():
+                        f.write(f"{reward_name}: {reward_value:.4f}\n")
+                    f.write(f"Total reward: {rewards_per_func[i].sum().item():.4f}\n")
+
+                    # Log judge response for this specific comparison
+                    if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
+                        f.write(f"\nJUDGE RESPONSE:\n{eval_class.last_judge_responses[i]}\n")
+
+                    # Log if trained model won this comparison
+                    trained_model_won = rewards_per_func_2[i,0] > 0
+                    f.write(f"\nOUTCOME: Compare model {'won' if trained_model_won else 'lost'} this comparison\n")
+                    f.write("-"*40 + "\n")
+
 
             # Log summary metrics for this question
             f.write("\nSUMMARY METRICS:\n")
@@ -189,16 +230,20 @@ def eval_on_test_set(
                     total_scores[k] += v
         
         # Calculate final metrics
-        win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
+        if args.debug:
+            win_rate = (total_wins / (2*total_comparisons)) * 100 if total_comparisons > 0 else 0
+        else:
+            win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
         avg_scores = {k: v/num_examples for k,v in total_scores.items()}
 
         # Save metrics
         metrics = {
             'win_rate': win_rate,
             'total_wins': total_wins,
-            'win_first': wins_first,
-            'win_second': wins_second,
-            'total_comparisons': total_comparisons,
+            'wins_first': wins_first,
+            'wins_second': wins_second,
+            'trained_first_cnt': trained_first_cnt,
+            'total_comparisons': 2*total_comparisons if args.debug else total_comparisons,
             'num_examples': num_examples,
             'average_scores': avg_scores
         }
@@ -208,7 +253,7 @@ def eval_on_test_set(
         f.write("-" * 20 + "\n")
         f.write(f"Win Rate: {win_rate:.2f}%\n")
         f.write(f"Total Wins: {total_wins}\n") 
-        f.write(f"Total Comparisons: {total_comparisons}\n")
+        f.write(f"Total Comparisons: {2*total_comparisons}\n")
         f.write("\nAverage Scores:\n")
         for metric, value in avg_scores.items():
             f.write(f"{metric:15s}: {value:.4f}\n")
@@ -976,7 +1021,7 @@ if __name__ == "__main__":
                 }, f, indent=4)
 
         # Save checkpoint
-        if (round_num + 1) % args.save_steps == 0:
+        if (round_num + 1) % args.save_steps == 0 and round_num >= 300:
             checkpoint_path = os.path.join(checkpoint_dir, f'step_{round_num}.pt')
             torch.save({
                 'round_num': round_num,
@@ -1028,6 +1073,7 @@ if __name__ == "__main__":
                 f"eval/total_wins": eval_metrics.get("total_wins", 0),
                 f"eval/wins_first": eval_metrics.get("wins_first", 0),
                 f"eval/wins_second": eval_metrics.get("wins_second", 0),
+                f"eval/trained_first_cnt": eval_metrics.get("trained_first_cnt", 0),
                 f"eval/total_comparisons": eval_metrics.get("total_comparisons", 0),
                 f"eval/num_examples": eval_metrics.get("num_examples", 0),
                 f"eval/average_scores": eval_metrics.get("average_scores", 0),

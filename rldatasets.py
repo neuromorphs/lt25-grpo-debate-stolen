@@ -63,7 +63,35 @@ Respond in the following format:
 """
 
 
+# PRE_PROMPT = """You will be given a debate topic and your position (PRO or CON). You should reason carefully about the position, then provide your argument.
+# It is very important that you put your reasoning process inside <reasoning> tags and your final argument inside <answer> tags, like this:
 
+# <reasoning>
+# Your step-by-step reasoning process here, considering key points and potential counterarguments
+# </reasoning>
+# <answer>
+# Your clear, concise 2-3 sentence debate position. 
+# </answer>
+
+# All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! Start each response by immediately starting with <reasoning>. 
+# """
+
+PRE_PROMPT = """You are an AI debater. You will be given a debate topic and your stance (PRO or CON).
+
+You must write your argument in the following format:
+
+<reasoning>
+Briefly work through your position in 3–5 concise sentences. This is your scratchpad — it helps you reason through the key points and anticipate counterarguments. This section will not be judged.
+</reasoning>
+<answer>
+Write a clear, self-contained 2–3 sentence argument that supports your position persuasively. Be concise and impactful — this is the only part that will be judged.
+</answer>
+
+Important rules:
+- Only include text within the <reasoning> and <answer> tags.
+- Your final argument should not reference the reasoning directly.
+- Judges will only see your <answer> and will evaluate it based on clarity, logic, and persuasiveness.
+"""
 
 class DebateDataLoader(DataLoader):
     """
@@ -77,18 +105,7 @@ class DebateDataLoader(DataLoader):
     def __init__(self, topics: list[str], random: bool = False) -> None:
         super().__init__(random)
         self.topics = topics
-        self.pre_prompt = """You will be given a debate topic and your position (PRO or CON). You should reason carefully about the position, then provide your argument.
-            It is very important that you put your reasoning process inside <reasoning> tags and your final argument inside <answer> tags, like this:
-
-            <reasoning>
-            Your step-by-step reasoning process here, considering key points and potential counterarguments
-            </reasoning>
-            <answer>
-            Your clear, concise 2-3 sentence debate position
-            </answer>
-
-            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! Start each response by immediately starting with <reasoning>. 
-            """
+        self.pre_prompt = PRE_PROMPT
         self.system_prompt = SYSTEM_PROMPT  # Using the same system prompt as GSM8K
             
     def __len__(self) -> int:
@@ -182,7 +199,7 @@ def build_debate_dataloaders(debug: bool = True) -> Tuple[DebateDataLoader, Deba
         ]
     # Split into train/test sets (85/15 split)
     total_topics = len(topics)
-    test_size = 1 if debug else int(total_topics * 0.15)
+    test_size = 1 if debug else 6 # int(total_topics * 0.15)
     
     # Generate random indices for test set
     test_indices = random.sample(range(total_topics), test_size)
@@ -199,266 +216,6 @@ def build_debate_dataloaders(debug: bool = True) -> Tuple[DebateDataLoader, Deba
     return trainloader, testloader
 
 
-class LDDataLoader(DataLoader):
-    """
-    A loader class that provides iteration over subjects for Larry David-style roasts.
-    
-    This class implements both sequential and random access to roast subjects through
-    standard Python iterator protocols. For each subject, it generates a prompt for a
-    Larry David-style roast.
-    """
-    
-    def __init__(self, subjects: list[str], random: bool = False) -> None:
-        super().__init__(random)
-        self.subjects = subjects
-        self.pre_prompt = """You will be given a subject to mock in Larry David's style from Curb Your Enthusiasm. 
-            You should first reason about how to make it funny and creative, then provide your mocking.
-            It is very important that you put your reasoning process inside <reasoning> tags and your actual roast inside <answer> tags, like this:
-
-            <reasoning>
-            Your step-by-step reasoning process here, thinking about what makes Larry David's humor unique and how to apply it to this subject
-            </reasoning>
-            <answer>
-            [Speak in first person as Larry David himself]
-            </answer>
-
-            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! Start each response by immediately starting with <reasoning>. 
-            """
-        self.system_prompt = SYSTEM_PROMPT
-            
-    def __len__(self) -> int:
-        return len(self.subjects)
-        
-    def __iter__(self) -> 'LDDataLoader':
-        return self
-        
-    def __next__(self) -> str:
-        if self.current_index >= len(self.subjects):
-            raise StopIteration
-        
-        if self.random:
-            idx = random.randint(0, len(self.subjects) - 1)
-        else:
-            idx = self.current_index
-            self.current_index += 1
-            
-        subject = self.subjects[idx]
-        
-        # Format the question to include the subject
-        formatted_question = f"Roast Subject: {subject}"
-        
-        return formatted_question
-
-    def reset(self):
-        self.current_index = 0
-
-
-def build_ld_dataloaders() -> Tuple[LDDataLoader, LDDataLoader]:
-    # Define roast subjects - mix of celebrities, social norms, and everyday situations
-    subjects = [
-        "People who clap when planes land",
-        "Selfie sticks",
-        "People who talk in movie theaters",
-        "Social media influencers",
-        "People who wear pajamas to the airport",
-        "Reality TV shows",
-        "People who take phone calls on speaker in public",
-        "Food delivery apps",
-        "People who post their entire lives on social media",
-        "Modern art",
-        "People who use emojis in work emails",
-        "Smartphone addiction",
-        "People who take photos of their food",
-        "Online dating",
-        "People who wear masks while driving alone",
-        "Social media challenges",
-        "People who use voice messages",
-        "Modern architecture",
-        "People who clap at the end of movies",
-        "Food trucks",
-        "People who use hashtags in regular conversation",
-        "Modern music",
-        "People who take selfies at funerals",
-        "Social media filters",
-        "People who use speakerphone in restaurants",
-        "Modern fashion",
-        "People who post workout videos",
-        "Food delivery fees",
-        "People who use voice assistants in public",
-        "Modern technology",
-        "People who take photos of everything",
-        "Social media algorithms",
-        "People who use emojis in texts",
-        "Modern entertainment",
-        "People who post their entire lives",
-        "Food delivery services",
-        "People who use voice messages",
-        "Modern society",
-        "People who take photos of everything",
-        "Social media culture",
-        "People who use emojis in emails",
-        "Modern lifestyle",
-        "People who post their entire lives",
-        "Food delivery apps",
-        "People who use voice assistants",
-        "Modern culture",
-        "People who take photos of everything",
-        "Social media trends",
-        "People who use emojis in texts",
-        "Modern world"
-    ]
-    
-    # Split into train/test sets (85/15 split)
-    total_subjects = len(subjects)
-    test_size = int(total_subjects * 0.15)
-    
-    # Generate random indices for test set
-    test_indices = random.sample(range(total_subjects), test_size)
-    test_indices_set = set(test_indices)
-    
-    # Split subjects
-    train_subjects = [s for i, s in enumerate(subjects) if i not in test_indices_set]
-    test_subjects = [subjects[i] for i in test_indices]
-    
-    # Create data loaders
-    trainloader = LDDataLoader(train_subjects, random=True)
-    testloader = LDDataLoader(test_subjects, random=False)
-    
-    return trainloader, testloader
-
-
-class ChoppedDataLoader(DataLoader):
-    """
-    A loader class that provides iteration over mystery baskets for Chopped-style recipe generation.
-    
-    This class implements both sequential and random access to mystery baskets through
-    standard Python iterator protocols. For each basket, it generates a prompt for creating
-    a creative recipe using all the mystery ingredients.
-    """
-    
-    def __init__(self, baskets: list[list[str]], random: bool = False) -> None:
-        super().__init__(random)
-        self.baskets = baskets
-        self.pre_prompt = """You will be given 4 mystery ingredients from a Chopped-style cooking show. 
-            You should first reason about how to create the best possible dish using these ingredients,
-            then provide a detailed recipe. It is very important that you put your reasoning process inside 
-            <reasoning> tags and your recipe inside <answer> tags, like this:
-
-            <reasoning>
-            Your step-by-step reasoning process here, thinking about:
-            1. How to balance flavors and textures
-            2. Cooking techniques that would work best
-            3. How to make the dish cohesive despite unusual combinations
-            4. Additional ingredients needed and why
-            5. Timing and execution strategy
-            </reasoning>
-            <answer>
-            A detailed recipe that:
-            - Uses all mystery ingredients
-            - Can be made in 40 minutes
-            - Includes a list of additional ingredients needed
-            - Has clear step-by-step instructions
-            - Includes timing estimates
-            </answer>
-
-            All of your returned text should either be in the <reasoning> or <answer> tags - no text outside! 
-            Start each response by immediately starting with <reasoning>. 
-            """
-        self.system_prompt = SYSTEM_PROMPT
-            
-    def __len__(self) -> int:
-        return len(self.baskets)
-        
-    def __iter__(self) -> 'ChoppedDataLoader':
-        return self
-        
-    def __next__(self) -> str:
-        if self.current_index >= len(self.baskets):
-            raise StopIteration
-        
-        if self.random:
-            idx = random.randint(0, len(self.baskets) - 1)
-        else:
-            idx = self.current_index
-            self.current_index += 1
-            
-        basket = self.baskets[idx]
-        
-        # Format the question to include the mystery basket
-        formatted_question = f"Mystery Basket:\n" + "\n".join(f"- {ingredient}" for ingredient in basket)
-        return formatted_question
-
-
-    def reset(self):
-        self.current_index = 0
-
-
-def build_chopped_dataloaders() -> Tuple[ChoppedDataLoader, ChoppedDataLoader]:
-    # Define base ingredients for training - mix of common and unusual ingredients
-    train_ingredients = [
-        "Gummy bears",
-        "Sardines",
-        "Popcorn",
-        "Hot sauce",
-        "Marshmallows",
-        "Kimchi",
-        "Coffee grounds",
-        "Coconut water",
-        "Bacon",
-        "Blue cheese",
-        "Ginger root",
-        "Lemon grass",
-        "Mint leaves",
-        "Pomegranate seeds",
-        "Soy sauce",
-        "Tofu",
-        "Wasabi",
-        "Yogurt",
-        "Zucchini",
-        "Quinoa"
-    ]
-    
-    # Define separate ingredients for testing
-    test_ingredients = [
-        "Durian",
-        "Seaweed",
-        "Crickets",
-        "Black garlic",
-        "Goat cheese",
-        "Mango",
-        "Curry powder",
-        "Pickled ginger",
-        "Coconut milk",
-        "Tempeh",
-        "Star anise",
-        "Lime leaves",
-        "Cilantro",
-        "Pomegranate molasses",
-        "Fish sauce",
-        "Miso paste",
-        "Sesame oil",
-        "Kombu",
-        "Shiitake mushrooms",
-        "Rice vinegar"
-    ]
-    
-    # Generate training baskets (80 baskets)
-    train_baskets = []
-    for _ in range(80):
-        basket = random.sample(train_ingredients, 4)
-        train_baskets.append(basket)
-    
-    # Generate test baskets (20 baskets)
-    test_baskets = []
-    for _ in range(10):
-        basket = random.sample(test_ingredients, 4)
-        test_baskets.append(basket)
-    
-    # Create data loaders
-    trainloader = ChoppedDataLoader(train_baskets, random=True)
-    testloader = ChoppedDataLoader(test_baskets, random=False)
-    
-    return trainloader, testloader
 
 
 def get_dataloaders(dataset_name: str, debug: bool = False) -> Tuple[DataLoader, DataLoader]:
@@ -476,10 +233,6 @@ def get_dataloaders(dataset_name: str, debug: bool = False) -> Tuple[DataLoader,
     """
     if dataset_name.lower() == 'debate':
         return build_debate_dataloaders(debug)
-    elif dataset_name.lower() == 'ld':
-        return build_ld_dataloaders()
-    elif dataset_name.lower() == 'chopped':
-        return build_chopped_dataloaders()
     else:
         raise ValueError(f"Dataset {dataset_name} not supported. Currently 'debate', 'ld', and 'chopped' are available.")
 
