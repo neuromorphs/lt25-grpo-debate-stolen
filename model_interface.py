@@ -168,7 +168,39 @@ class HuggingFaceModel(ModelInterface):
             skip_special_tokens=True
         )
         
-        return response.strip()
+        return response.strip() #, prompt_text, response
+
+    def generate_detailed(self, system_prompt: str, user_prompt: str, **kwargs) -> str:
+        # Format prompt in chat template
+        prompt = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ]
+        prompt_text = self.tokenizer.apply_chat_template(prompt, tokenize=False)
+        
+        # Tokenize
+        inputs = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            padding=True,
+            padding_side="left"
+        ).to(self.device)
+        
+        # Generate
+        outputs = self.model.generate(
+            inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],
+            **kwargs
+        )
+        
+        # Decode only the new tokens
+        response = self.tokenizer.decode(
+            outputs[0, inputs["input_ids"].shape[1]:],
+            skip_special_tokens=True
+        )
+        
+        return response.strip(), prompt_text, response
+
 
 class OpenAIModel(ModelInterface):
     """Implementation of ModelInterface for OpenAI API models."""
