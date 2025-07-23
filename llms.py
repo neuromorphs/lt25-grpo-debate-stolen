@@ -60,13 +60,14 @@ def get_judge_model(model_name: str, device: str) -> ModelInterface:
         model, tokenizer = get_llm_tokenizer(model_name, device)
         return HuggingFaceModel(model, tokenizer, device)
 
-def get_compare_model(model_name: str, device: str) -> ModelInterface:
+def get_compare_model(model_name: str, device: str, checkpoint_path: str = None) -> ModelInterface:
     """
     Create a compare model interface based on the model name.
     
     Args:
         model_name: Name of the model to use (can be HF model name or API model name)
         device: Device to load the model on ('cpu' or 'cuda')
+        checkpoint_path: Optional path to a checkpoint file to load weights from
         
     Returns:
         ModelInterface: The compare model interface
@@ -78,4 +79,11 @@ def get_compare_model(model_name: str, device: str) -> ModelInterface:
             return AnthropicModel(model_name)
     else:
         model, tokenizer = get_llm_tokenizer(model_name, device)
+        
+        # Load checkpoint if specified
+        if checkpoint_path:
+            checkpoint = torch.load(checkpoint_path, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print(f"Loaded compare model from checkpoint: {checkpoint_path}")
+        
         return HuggingFaceModel(model, tokenizer, device)

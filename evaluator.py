@@ -81,6 +81,8 @@ def get_evaluator(name: str) -> RewardEvaluator:
     """
     if name.lower() == "debate":
         return DebateEvaluator()
+    elif name.lower() == "debate_opponent":
+        return DebateEvaluatorOpponent()
     else:
         raise NotImplementedError(f"No evaluator implemented for {name}")
 
@@ -108,6 +110,42 @@ Which response was more compelling? Respond with EXACTLY one of these options:
 YOU MUST CHOOSE A WINNER, A TIE IS NOT ALLOWED. ONLY RESPOND WITH ARGUMENT_1_WINS OR ARGUMENT_2_WINS.
 """
 
+JUDGE_PROMPT_COMPREHENSIVE="""
+You are an impartial debate judge. You will be shown two debate responses on the same topic, 
+arguing {debate_mode}. You must judge the arguments **solely on their content and merit**. Do not favor an argument based on its order (1 or 2).
+Your task is to determine which argument was more compelling based on:
+1. Logical reasoning and evidence
+2. Clear structure and organization
+3. Effective use of examples
+4. Respectful tone
+5. Addressing potential counterarguments
+
+Topic: {topic}
+
+IMPORTANT: Both arguments were instructed to argue {position} the topic. However it is possible they didn't follow this instruction. IT IS CRUCIAL THAT YOU DETERMINE IF THEY DID.
+
+
+Argument 1:
+{arg1_response}
+
+Argument 2:
+{arg2_response}
+
+
+EVALUATION STEPS:
+STEP 1 - Identify actual positions:
+What position does each argument actually defend?
+- ARGUMENT_1_ACTUAL_POSITION: PRO or CON
+- ARGUMENT_2_ACTUAL_POSITION: PRO or CON
+
+STEP 2 - Determine winner
+
+REQUIRED RESPONSE FORMAT:
+ARGUMENT_1_ACTUAL_POSITION: [PRO/CON]
+ARGUMENT_2_ACTUAL_POSITION: [PRO/CON]
+WINNER: [ARGUMENT_1_WINS/ARGUMENT_2_WINS]
+"""
+
 class DebateEvaluator(RewardEvaluator):
     """
     Reward evaluator for debate responses using two different approaches:
@@ -119,6 +157,54 @@ class DebateEvaluator(RewardEvaluator):
         self.num_reward_functions = 4  # debate score + 3 format rewards
         self.debate_modes = ['the same side (PRO or CON)', 'opposite sides (PRO vs CON)']
         self.judge_prompt = JUDGE_PROMPT
+        self.use_comprehensive_prompt = False  # Flag to switch between prompts
+        
+    def set_comprehensive_prompt(self, use_comprehensive: bool = True):
+        """Switch to using the comprehensive judge prompt."""
+        self.use_comprehensive_prompt = use_comprehensive
+        if use_comprehensive:
+            self.judge_prompt = JUDGE_PROMPT_COMPREHENSIVE
+        else:
+            self.judge_prompt = JUDGE_PROMPT
+        
+    def _parse_comprehensive_judge_response(self, judge_response: str) -> Tuple[str, str, str]:
+        """
+        Parse comprehensive judge response format.
+        
+        Returns:
+            (arg1_position, arg2_position, winner)
+        """
+        judge_response = judge_response.strip().upper()
+        
+        # Extract positions
+        arg1_position = "UNKNOWN"
+        arg2_position = "UNKNOWN" 
+        winner = "UNKNOWN"
+        
+        # Parse ARGUMENT_1_ACTUAL_POSITION
+        if "ARGUMENT_1_ACTUAL_POSITION:" in judge_response:
+            line = [line for line in judge_response.split('\n') if "ARGUMENT_1_ACTUAL_POSITION:" in line][0]
+            if "PRO" in line:
+                arg1_position = "PRO"
+            elif "CON" in line:
+                arg1_position = "CON"
+                
+        # Parse ARGUMENT_2_ACTUAL_POSITION  
+        if "ARGUMENT_2_ACTUAL_POSITION:" in judge_response:
+            line = [line for line in judge_response.split('\n') if "ARGUMENT_2_ACTUAL_POSITION:" in line][0]
+            if "PRO" in line:
+                arg2_position = "PRO"
+            elif "CON" in line:
+                arg2_position = "CON"
+                
+        # Parse WINNER
+        if "WINNER:" in judge_response:
+            if "ARGUMENT_1_WINS" in judge_response:
+                winner = "ARGUMENT_1_WINS"
+            elif "ARGUMENT_2_WINS" in judge_response:
+                winner = "ARGUMENT_2_WINS"
+        
+        return arg1_position, arg2_position, winner
         
     def _extract_xml_answer(self, text: str) -> str:
         """Extract the answer portion from XML tags."""
@@ -293,7 +379,7 @@ class DebateEvaluator(RewardEvaluator):
         }
         
         return rewards_per_func, metrics, win_rate_2
-     
+
     def _compute_train_rewards(
         self,
         input_prompt: str,
@@ -302,6 +388,525 @@ class DebateEvaluator(RewardEvaluator):
         device: str
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Round-robin tournament scoring for training + format rewards."""
+        self.set_comprehensive_prompt(True)  # Use comprehensive prompt for training
+        num_completions = len(train_model_completions)
+        rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+        
+        # Track wins for each completion using a single wins matrix
+        wins_matrix = torch.zeros((num_completions, num_completions), device=device)
+        
+        topic = input_prompt['question']
+        position_id = input_prompt['position_id']
+        gt_pos  = input_prompt['positions'][position_id]
+        self.last_judge_responses = []
+        all_judge_responses = []
+        
+        # Get debate scores using round-robin tournament
+        for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
+            for j in range(num_completions):
+                if i == j:
+                    continue
+                response1 = self._extract_xml_answer(train_model_completions[i])
+                response2 = self._extract_xml_answer(train_model_completions[j])
+                
+                # if response1 == 'ERROR':
+                #     wins[j] += 1
+                #     losses[i] += 1
+                #     continue
+                # elif response2 == 'ERROR':
+                #     wins[i] += 1
+                #     losses[j] += 1
+                #     continue
+                # else:
+                judge_prompt = self.judge_prompt.format(
+                    debate_mode=self.debate_modes[0],  # Same side
+                    topic=topic,
+                    position=gt_pos,
+                    arg1_response=response1,
+                    arg2_response=response2
+                )
+                
+                # Get judge's decision using the interface
+                judge_response_full = all_models["judge_model"].generate(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompt=judge_prompt,
+                    max_new_tokens=200,  # Increased for comprehensive format
+                    temperature=0.1
+                )
+                all_judge_responses.append(judge_response_full)
+                
+                # Parse response and update wins matrix directly
+                if self.use_comprehensive_prompt:
+                    arg1_pos, arg2_pos, winner = self._parse_comprehensive_judge_response(judge_response_full)
+                    if winner == "ARGUMENT_1_WINS" and arg1_pos == gt_pos:
+                        wins_matrix[i, j] = 1
+                    elif winner == "ARGUMENT_2_WINS" and arg2_pos != gt_pos:
+                        wins_matrix[i, j] = 1
+                else:
+                    # Original simple parsing
+                    judge_response = judge_response_full.strip().upper()
+                    if "ARGUMENT_1_WINS" in judge_response:
+                        wins_matrix[i, j] = 1
+
+        # Calculate normalized scores using wins matrix
+        wins_first = wins_matrix.sum(dim=1)  # Total wins per completion
+        wins_second = (num_completions - 1) - wins_matrix.sum(dim=0)  # Total losses per completion (wins for others)
+        wins = wins_first + wins_second  # Total wins across both sides
+        total_matches = 2*(num_completions - 1)  # number of matches per completion
+        win_rate = wins / total_matches
+        # loss_rate = losses / total_matches
+        debate_scores = (2*win_rate - 1) * 1.5  # Scale to desired range
+
+        # Get format rewards
+        strict_format = torch.tensor(
+            self._strict_format_reward(train_model_completions), 
+            device=device
+        )
+        soft_format = torch.tensor(
+            self._soft_format_reward(train_model_completions), 
+            device=device
+        )
+        xml_count = torch.tensor(
+            self._xml_count_reward(train_model_completions), 
+            device=device
+        )
+        
+        # Combine all rewards
+        rewards_per_func[:, 0] = debate_scores
+        rewards_per_func[:, 1] = strict_format
+        rewards_per_func[:, 2] = soft_format
+        rewards_per_func[:, 3] = xml_count
+        
+        metrics = {
+            "rewards/mean_win_rate": win_rate.mean().item(),
+            "rewards/mean_win_first": wins_first.mean().item(),
+            "rewards/mean_win_second": wins_second.mean().item(),
+            "rewards/mean_debate_score": debate_scores.mean().item(),
+            "rewards/mean_strict_format": strict_format.mean().item(),
+            "rewards/mean_soft_format": soft_format.mean().item(),
+            "rewards/mean_xml_count": xml_count.mean().item(),
+            "mean_reward": rewards_per_func.sum(dim=1).mean().item()
+        }
+        self.set_comprehensive_prompt(False)  # Reset to default prompt
+        return rewards_per_func, metrics
+
+    def _compute_test_rewards(
+        self,
+        input_prompt: Dict[str, Any],
+        all_models: Dict[str, Any],
+        train_model_completions: List[str],
+        compare_model_completions: List[str],
+        device: str,
+        train_first: bool,
+        contrastive: bool
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Head-to-head debates against base model for testing."""
+        num_debates = len(train_model_completions)
+        rewards_per_func = torch.zeros(num_debates, self.num_reward_functions, device=device)
+        wins = 0
+        
+        # Get format rewards
+        strict_format = torch.tensor(
+            self._strict_format_reward(train_model_completions), 
+            device=device
+        )
+        soft_format = torch.tensor(
+            self._soft_format_reward(train_model_completions), 
+            device=device
+        )
+        xml_count = torch.tensor(
+            self._xml_count_reward(train_model_completions), 
+            device=device
+        )
+        
+        topic = input_prompt['question']
+        gt_pos = input_prompt['positions'][input_prompt['position_id']]
+        self.last_judge_responses = []
+        judge_prompts = []
+        all_judge_responses = []
+        judge_responses = []
+        for i in range(num_debates):
+            # Get trained model's response
+            trained_response = self._extract_xml_answer(train_model_completions[i])
+            
+            # Get compare model's response
+            compare_response = self._extract_xml_answer(compare_model_completions[i])     
+
+            if trained_response == 'ERROR':
+                judge_responses.append('ARGUMENT_2_WINS')
+                continue
+            elif compare_response == 'ERROR':
+                judge_responses.append('ARGUMENT_1_WINS')
+                continue
+            else:
+                # Format judge prompt
+                judge_prompt = self.judge_prompt.format(
+                    debate_mode=self.debate_modes[1] if contrastive else self.debate_modes[0],  # Opposite sides if contrastive
+                    topic=topic,
+                    arg1_response=trained_response,
+                    arg2_response=compare_response
+                )
+            #     judge_prompts.append(judge_prompt)
+                
+            # # Get judge's decision using the interface
+            # judge_responses = all_models["judge_model"].generate_batch_prompts(
+            #     system_prompt="You are an impartial debate judge.",
+            #     user_prompts=judge_prompts,
+            #     max_new_tokens=50,
+            #     temperature=0.1
+            # ) 
+            if self.use_comprehensive_prompt:
+                _, _, judge_response_full = self._parse_comprehensive_judge_response(
+                    all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=200,  # Increased for comprehensive format
+                        temperature=0.1
+                    )
+                )
+                all_judge_responses.append(judge_response_full)
+                judge_response = judge_response_full.strip().upper()
+                judge_responses.append(judge_response)
+
+            else:
+
+                judge_response_full = all_models["judge_model"].generate(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompt=judge_prompt,
+                    max_new_tokens=50,
+                    temperature=0.1
+                )
+                all_judge_responses.append(judge_response_full)
+                judge_response = judge_response_full.strip().upper()
+                judge_responses.append(judge_response)
+
+
+        for i, judge_response in enumerate(judge_responses):
+            # Parse response based on prompt type
+            if self.use_comprehensive_prompt:
+                arg1_pos, arg2_pos, winner = self._parse_comprehensive_judge_response(judge_response)
+                if winner == "ARGUMENT_1_WINS" and train_first:
+                    if arg1_pos == gt_pos:
+                        score = 1.0
+                        rewards_per_func[i, 0] = score
+                        wins += 1
+                    else:
+                        # If neither argument is correct, treat as a loss for both
+                        score = 0.0
+                        rewards_per_func[i, 0] = score
+                elif winner == "ARGUMENT_2_WINS" and not train_first:
+                    if arg2_pos == gt_pos:
+                        score = 1.0
+                        rewards_per_func[i, 0] = score
+                        wins += 1
+                    else:
+                        # If neither argument is correct, treat as a loss for both
+                        score = 0.0
+                        rewards_per_func[i, 0] = score
+            else:
+                # Original simple parsing
+                if "ARGUMENT_1_WINS" in judge_response and train_first:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
+                elif "ARGUMENT_2_WINS" in judge_response and not train_first:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
+                else:
+                    score = 0.0
+                    rewards_per_func[i, 0] = score
+
+            # Add format rewards
+            rewards_per_func[i, 1] = strict_format[i]
+            rewards_per_func[i, 2] = soft_format[i]
+            rewards_per_func[i, 3] = xml_count[i]
+
+            # Store judge responses for logging
+            # self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
+
+        win_rate = wins / num_debates
+        metrics = {
+            "win_rate": win_rate,
+            "reward": rewards_per_func.mean().item(),
+            "num_wins": wins,
+            "num_debates": num_debates,
+            "rewards/strict_format": strict_format.mean().item(),
+            "rewards/soft_format": soft_format.mean().item(), 
+            "rewards/xml_count": xml_count.mean().item()
+        }
+        
+        return rewards_per_func, metrics
+
+    def compute_rewards(
+        self,
+        input_prompt: str,
+        all_models: Dict[str, Any],
+        train_model_completions: List[str],
+        compare_model_completions: Optional[List[str]] = None,
+        device: str = "cuda",
+        is_test: bool = False,
+        contrastive: bool = False,
+        one_first: Optional[bool] = None
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute rewards - different behavior for training vs testing."""
+        if is_test:
+            return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device, one_first, contrastive)
+        else:
+            if contrastive:
+                if one_first is None: raise ValueError("one_first must be specified for contrastive training")
+                return self._compute_train_contrastive_rewards(
+                    input_prompt, all_models, train_model_completions, compare_model_completions, device, one_first=one_first
+                )
+            else:
+                return self._compute_train_rewards(input_prompt, all_models, train_model_completions, device)
+            
+    def get_reward_breakdown(self, rewards: torch.Tensor) -> Dict[str, float]:
+        """Convert raw reward scores to a labeled dictionary."""
+        return {
+            "debate_score": rewards[0].item(),
+            "strict_format": rewards[1].item(),
+            "soft_format": rewards[2].item(),
+            "xml_count": rewards[3].item()
+        }
+    
+
+class DebateEvaluatorOpponent(RewardEvaluator):
+    """
+    Reward evaluator for debate responses using two different approaches:
+    1. For training: round-robin tournament scoring between generated responses
+    2. For testing: head-to-head debates against the base model
+    """
+    
+    def __init__(self):
+        self.num_reward_functions = 4  # debate score + 3 format rewards
+        self.debate_modes = ['the same side (PRO or CON)', 'opposite sides (PRO vs CON)']
+        self.judge_prompt = JUDGE_PROMPT
+        self.use_comprehensive_prompt = False  # Flag to switch between prompts
+        
+    def set_comprehensive_prompt(self, use_comprehensive: bool = True):
+        """Switch to using the comprehensive judge prompt."""
+        self.use_comprehensive_prompt = use_comprehensive
+        if use_comprehensive:
+            self.judge_prompt = JUDGE_PROMPT_COMPREHENSIVE
+        else:
+            self.judge_prompt = JUDGE_PROMPT
+        
+    def _parse_comprehensive_judge_response(self, judge_response: str) -> Tuple[str, str, str]:
+        """
+        Parse comprehensive judge response format.
+        
+        Returns:
+            (arg1_position, arg2_position, winner)
+        """
+        judge_response = judge_response.strip().upper()
+        
+        # Extract positions
+        arg1_position = "UNKNOWN"
+        arg2_position = "UNKNOWN" 
+        winner = "UNKNOWN"
+        
+        # Parse ARGUMENT_1_ACTUAL_POSITION
+        if "ARGUMENT_1_ACTUAL_POSITION:" in judge_response:
+            line = [line for line in judge_response.split('\n') if "ARGUMENT_1_ACTUAL_POSITION:" in line][0]
+            if "PRO" in line:
+                arg1_position = "PRO"
+            elif "CON" in line:
+                arg1_position = "CON"
+                
+        # Parse ARGUMENT_2_ACTUAL_POSITION  
+        if "ARGUMENT_2_ACTUAL_POSITION:" in judge_response:
+            line = [line for line in judge_response.split('\n') if "ARGUMENT_2_ACTUAL_POSITION:" in line][0]
+            if "PRO" in line:
+                arg2_position = "PRO"
+            elif "CON" in line:
+                arg2_position = "CON"
+                
+        # Parse WINNER
+        if "WINNER:" in judge_response:
+            if "ARGUMENT_1_WINS" in judge_response:
+                winner = "ARGUMENT_1_WINS"
+            elif "ARGUMENT_2_WINS" in judge_response:
+                winner = "ARGUMENT_2_WINS"
+        
+        return arg1_position, arg2_position, winner
+        
+    def _extract_xml_answer(self, text: str) -> str:
+        """Extract the answer portion from XML tags."""
+        try:
+            answer = text.split("<answer>")[-1]
+            answer = answer.split("</answer>")[0]
+            return answer.strip()
+        except:
+            return 'ERROR'  # Fallback if format is incorrect
+
+    def _strict_format_reward(self, completions) -> List[float]:
+        """Reward for strict XML format."""
+        pattern = r"<reasoning>\n.*?\n</reasoning>\n<answer>\n.*?\n</answer>"
+        matches = [bool(re.search(pattern, r, re.DOTALL)) for r in completions]
+        return [0.5 * 2 if m else 0.0 for m in matches]
+
+    def _soft_format_reward(self, completions) -> List[float]:
+        """Reward for relaxed XML format."""
+        pattern = r"<reasoning>.*?</reasoning>\s*<answer>.*?</answer>"
+        matches = [bool(re.search(pattern, r, re.DOTALL)) for r in completions]
+        return [0.5 * 2 if m else 0.0 for m in matches]
+
+    def _xml_count_reward(self, completions) -> List[float]:
+        """Reward for XML tag counting."""
+        def count_xml(text: str) -> float:
+            count = 0.0
+            if "<reasoning>" in text: count += 0.125 * 2
+            if "</reasoning>" in text: count += 0.125 * 2
+            if "<answer>" in text: count += 0.125 * 2
+            if "</answer>" in text: count += 0.125 * 2
+
+            # Only penalize actual content after final tag
+            if "</answer>" in text:
+                count -= len(text.split("</answer>")[-1].strip())*0.001
+            return count
+            
+        return [count_xml(r) for r in completions]
+    
+    def _compute_train_contrastive_rewards(
+        self,
+        input_prompt: str,
+        all_models: Dict[str, Any],
+        model_completions: List[str],
+        model_completions_2: List[str],
+        device: str,
+        one_first: bool,
+    ) -> Tuple[torch.Tensor, Dict[str, float], torch.Tensor]:
+        """Semi-batched round-robin tournament scoring - batch inner loop only."""
+        num_completions = len(model_completions)
+        rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
+        
+        # Track wins/losses for each completion
+        wins_table = torch.zeros((num_completions, num_completions), device=device)
+        
+        topic = input_prompt['question']
+        self.last_judge_responses = []
+        
+        # Batch the inner loop for each completion
+        for i in tqdm(range(num_completions), desc="Evaluating completions", leave=False):
+            # Collect all comparisons for completion i
+            judge_prompts = []
+            comparison_indices = []
+            
+            for j in range(num_completions):
+                response1 = self._extract_xml_answer(model_completions[i])
+                response2 = self._extract_xml_answer(model_completions_2[j])
+                
+                if one_first:
+                    response1 = 'defending the answer ' + input_prompt['positions'][0] + ':\n' + response1
+                    response2 = 'defending the answer ' + input_prompt['positions'][1] + ':\n' + response2
+                else:
+                    response1 = 'defending the answer ' + input_prompt['positions'][1] + ':\n' + response1
+                    response2 = 'defending the answer ' + input_prompt['positions'][0] + ':\n' + response2
+
+                judge_prompt = self.judge_prompt.format(
+                    debate_mode=self.debate_modes[1],  # Opposite sides
+                    topic=topic,
+                    arg1_response=response1, # gather the answer and add it
+                    arg2_response=response2 
+                )
+                
+                judge_prompts.append(judge_prompt)
+                comparison_indices.append(j)
+            
+            # Skip if no comparisons for this completion
+            if not judge_prompts:
+                continue
+            
+            # Batch evaluate all comparisons for completion i
+            if hasattr(all_models["judge_model"], 'generate_batch_prompts'):
+                judge_responses = all_models["judge_model"].generate_batch_prompts(
+                    system_prompt="You are an impartial debate judge.",
+                    user_prompts=judge_prompts,
+                    max_new_tokens=50,
+                    temperature=0.1
+                )
+            else:
+                # Fallback to sequential evaluation
+                judge_responses = []
+                for judge_prompt in judge_prompts:
+                    response = all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=50,
+                        temperature=0.1
+                    )
+                    judge_responses.append(response)
+
+            # Store judge responses for logging
+
+            
+            # Process judge responses for completion i
+            for j, judge_response in zip(comparison_indices, judge_responses):
+                judge_response = judge_response.strip().upper()
+                answer_parsed = extract_winner_by_count(judge_response)
+
+                if answer_parsed == "ARGUMENT_1_WINS":
+                    wins_table[i, j] = 1
+                
+                # Store judge responses for logging
+                self.last_judge_responses.append(f"{judge_response} \nAnswer parsed: {answer_parsed}")
+
+        # Calculate normalized scores (-1.5 to 1.5 range)
+        total_matches = num_completions  # number of matches per completion
+        wins   = wins_table.sum(dim=1)  # Wins for PRO model
+        wins_2 = num_completions - wins_table.sum(dim=0)  # Wins for CON model
+        win_rate   = wins   / total_matches
+        win_rate_2 = wins_2 / total_matches
+
+        # Clean role prefixes that chat template might have added
+        cleaned_completions = []
+        for completion in model_completions:
+            # Remove common role prefixes
+            completion = completion.strip()
+            if completion.startswith(('user\n', 'system\n', 'assistant\n')):
+                completion = completion.split('\n', 1)[1] if '\n' in completion else completion
+            cleaned_completions.append(completion)
+
+        # Get format rewards
+        strict_format = torch.tensor(
+            self._strict_format_reward(cleaned_completions), 
+            device=device
+        )
+        soft_format = torch.tensor(
+            self._soft_format_reward(cleaned_completions), 
+            device=device
+        )
+        xml_count = torch.tensor(
+            self._xml_count_reward(cleaned_completions), 
+            device=device
+        )
+
+        # Combine all rewards
+        rewards_per_func[:, 0] = win_rate
+        rewards_per_func[:, 1] = strict_format
+        rewards_per_func[:, 2] = soft_format
+        rewards_per_func[:, 3] = xml_count
+        
+        metrics = {
+            "rewards/mean_win_rate_first": win_rate.mean().item(),
+            "rewards/mean_win_rate_2_second": win_rate_2.mean().item(),
+            "rewards/mean_strict_format": strict_format.mean().item(),
+            "rewards/mean_soft_format": soft_format.mean().item(),
+            "rewards/mean_xml_count": xml_count.mean().item(),
+        }
+        
+        return rewards_per_func, metrics, win_rate_2
+    
+    def _compute_train_rewards(
+        self,
+        input_prompt: str,
+        all_models: Dict[str, Any],
+        train_model_completions: List[str],
+        device: str
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Round-robin tournament scoring for training + format rewards."""
+        self.set_comprehensive_prompt(True)  # Use comprehensive prompt for training
         num_completions = len(train_model_completions)
         rewards_per_func = torch.zeros(num_completions, self.num_reward_functions, device=device)
         
@@ -310,6 +915,8 @@ class DebateEvaluator(RewardEvaluator):
         losses = torch.zeros(num_completions, device=device)
         
         topic = input_prompt['question']
+        position_id = input_prompt['position_id']
+        gt_pos  = input_prompt['positions'][position_id]
         self.last_judge_responses = []
         all_judge_responses = []
         # Get debate scores using round-robin tournament
@@ -331,6 +938,7 @@ class DebateEvaluator(RewardEvaluator):
                 judge_prompt = self.judge_prompt.format(
                     debate_mode=self.debate_modes[0],  # Same side
                     topic=topic,
+                    position=gt_pos,
                     arg1_response=response1,
                     arg2_response=response2
                 )
@@ -339,18 +947,45 @@ class DebateEvaluator(RewardEvaluator):
                 judge_response_full = all_models["judge_model"].generate(
                     system_prompt="You are an impartial debate judge.",
                     user_prompt=judge_prompt,
-                    max_new_tokens=50,
+                    max_new_tokens=200,  # Increased for comprehensive format
                     temperature=0.1
                 )
                 all_judge_responses.append(judge_response_full)
-                judge_response = judge_response_full.strip().upper()
                 
-                if "ARGUMENT_1_WINS" in judge_response:
-                    wins[i] += 1
-                    losses[j] += 1
-                elif "ARGUMENT_2_WINS" in judge_response:
-                    wins[j] += 1
-                    losses[i] += 1
+                # Parse response based on prompt type
+                if self.use_comprehensive_prompt:
+                    arg1_pos, arg2_pos, winner = self._parse_comprehensive_judge_response(judge_response_full)
+                    if winner == "ARGUMENT_1_WINS":
+                        if arg1_pos == gt_pos:
+                            wins[i] += 1
+                            losses[j] += 1
+                        elif arg2_pos == gt_pos:
+                            wins[j] += 1
+                            losses[i] += 1
+                        else:
+                            # If neither argument is correct, treat as a loss for both
+                            losses[i] += 1
+                            losses[j] += 1
+                    elif winner == "ARGUMENT_2_WINS":
+                        if arg2_pos == gt_pos:
+                            wins[j] += 1
+                            losses[i] += 1
+                        elif arg1_pos == gt_pos:
+                            wins[i] += 1
+                            losses[j] += 1
+                        else:
+                            # If neither argument is correct, treat as a loss for both
+                            losses[i] += 1
+                            losses[j] += 1
+                else:
+                    # Original simple parsing
+                    judge_response = judge_response_full.strip().upper()
+                    if "ARGUMENT_1_WINS" in judge_response:
+                        wins[i] += 1
+                        losses[j] += 1
+                    elif "ARGUMENT_2_WINS" in judge_response:
+                        wins[j] += 1
+                        losses[i] += 1
 
         # wins_2 = torch.zeros(num_completions, device=device)
         # losses_2 = torch.zeros(num_completions, device=device)
@@ -449,16 +1084,18 @@ class DebateEvaluator(RewardEvaluator):
             "rewards/mean_xml_count": xml_count.mean().item(),
             "mean_reward": rewards_per_func.sum(dim=1).mean().item()
         }
-        
+        self.set_comprehensive_prompt(False)  # Reset to default prompt
         return rewards_per_func, metrics
+
 
     def _compute_test_rewards(
         self,
-        prompt: str,
+        input_prompt: Dict[str, Any],
         all_models: Dict[str, Any],
         train_model_completions: List[str],
         compare_model_completions: List[str],
         device: str,
+        train_first: bool,
         contrastive: bool
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Head-to-head debates against base model for testing."""
@@ -480,7 +1117,8 @@ class DebateEvaluator(RewardEvaluator):
             device=device
         )
         
-        topic = prompt.split('\nPosition:')[0].split("Debate Topic: ")[1]
+        topic = input_prompt['question']
+        gt_pos = input_prompt['positions'][input_prompt['position_id']]
         self.last_judge_responses = []
         judge_prompts = []
         all_judge_responses = []
@@ -514,7 +1152,22 @@ class DebateEvaluator(RewardEvaluator):
             #     user_prompts=judge_prompts,
             #     max_new_tokens=50,
             #     temperature=0.1
-            # )
+            # ) 
+            if self.use_comprehensive_prompt:
+                _, _, judge_response_full = self._parse_comprehensive_judge_response(
+                    all_models["judge_model"].generate(
+                        system_prompt="You are an impartial debate judge.",
+                        user_prompt=judge_prompt,
+                        max_new_tokens=200,  # Increased for comprehensive format
+                        temperature=0.1
+                    )
+                )
+                all_judge_responses.append(judge_response_full)
+                judge_response = judge_response_full.strip().upper()
+                judge_responses.append(judge_response)
+
+            else:
+
                 judge_response_full = all_models["judge_model"].generate(
                     system_prompt="You are an impartial debate judge.",
                     user_prompt=judge_prompt,
@@ -527,14 +1180,40 @@ class DebateEvaluator(RewardEvaluator):
 
 
         for i, judge_response in enumerate(judge_responses):
-            # judge_response = judge_response.strip().upper()
-            # answer_parsed = extract_winner_by_count(judge_response)
-
-            # if answer_parsed == "ARGUMENT_1_WINS":
-            if "ARGUMENT_1_WINS" in judge_response:
-                score = 1.0
-                rewards_per_func[i, 0] = score
-                wins += 1
+            # Parse response based on prompt type
+            if self.use_comprehensive_prompt:
+                arg1_pos, arg2_pos, winner = self._parse_comprehensive_judge_response(judge_response)
+                if winner == "ARGUMENT_1_WINS" and train_first:
+                    if arg1_pos == gt_pos:
+                        score = 1.0
+                        rewards_per_func[i, 0] = score
+                        wins += 1
+                    else:
+                        # If neither argument is correct, treat as a loss for both
+                        score = 0.0
+                        rewards_per_func[i, 0] = score
+                elif winner == "ARGUMENT_2_WINS" and not train_first:
+                    if arg2_pos == gt_pos:
+                        score = 1.0
+                        rewards_per_func[i, 0] = score
+                        wins += 1
+                    else:
+                        # If neither argument is correct, treat as a loss for both
+                        score = 0.0
+                        rewards_per_func[i, 0] = score
+            else:
+                # Original simple parsing
+                if "ARGUMENT_1_WINS" in judge_response and train_first:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
+                elif "ARGUMENT_2_WINS" in judge_response and not train_first:
+                    score = 1.0
+                    rewards_per_func[i, 0] = score
+                    wins += 1
+                else:
+                    score = 0.0
+                    rewards_per_func[i, 0] = score
 
             # Add format rewards
             rewards_per_func[i, 1] = strict_format[i]
@@ -570,7 +1249,7 @@ class DebateEvaluator(RewardEvaluator):
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute rewards - different behavior for training vs testing."""
         if is_test:
-            return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device, contrastive)
+            return self._compute_test_rewards(input_prompt, all_models, train_model_completions, compare_model_completions, device, one_first, contrastive)
         else:
             if contrastive:
                 if one_first is None: raise ValueError("one_first must be specified for contrastive training")
@@ -588,3 +1267,4 @@ class DebateEvaluator(RewardEvaluator):
             "soft_format": rewards[2].item(),
             "xml_count": rewards[3].item()
         }
+

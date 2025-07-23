@@ -24,6 +24,39 @@ except ImportError:
     print("Warning: wandb not installed. Install with 'pip install wandb' to enable logging.")
 
 
+def format_response_as_dict(completion: str, prefix: str = "response") -> str:
+    """
+    Format a completion response as a Python dictionary that can be copy-pasted.
+    
+    Args:
+        completion: The full model completion text
+        prefix: Variable name prefix for the dictionary
+        
+    Returns:
+        String containing the formatted dictionary
+    """
+    try:
+        reasoning = completion.split("<reasoning>\n")[1].split("\n</reasoning>")[0]
+    except:
+        reasoning = ""
+    
+    try:
+        answer = completion.split("<answer>\n")[1].split("\n</answer>")[0]
+    except:
+        answer = ""
+    
+    # Escape triple quotes in the text
+    full_escaped = completion.replace('"""', r'\"\"\"')
+    reasoning_escaped = reasoning.replace('"""', r'\"\"\"')
+    answer_escaped = answer.replace('"""', r'\"\"\"')
+    
+    return f"""{prefix} = {{
+    'full': \"\"\"{full_escaped}\"\"\",
+    'reasoning': \"\"\"{reasoning_escaped}\"\"\",  # empty if not available
+    'answer': \"\"\"{answer_escaped}\"\"\"  # empty if not available
+}}"""
+
+
 def eval_on_test_set(
     all_models: dict,
     test_loader: rldatasets.DataLoader,
@@ -69,7 +102,7 @@ def eval_on_test_set(
 
             # Log Initial prompt 
             f.write("\n" + "="*80 + "\n")
-            f.write(f"Example #{num_examples}\n")
+            f.write(f"QUESTION #{num_examples}\n")
             f.write("="*80 + "\n\n")
             
             f.write("Prompt:\n")
@@ -98,63 +131,79 @@ def eval_on_test_set(
                     temperature=args.temperature
                 )
                 compare_completions_text.append(completion)
-
-            if args.debug:
-                arg1 = completions_text
-                arg2 = compare_completions_text
-            else: 
-                trained_first = random.choice([True, False]) # Randomly choose which model is first
-                trained_first_cnt += 1 if trained_first else 0
-                arg1 = completions_text         if trained_first else compare_completions_text
-                arg2 = compare_completions_text if trained_first else completions_text
+            
+            arg1 = completions_text
+            arg2 = compare_completions_text
+            input_prompt = {
+                'question': question,
+                'positions': positions,
+                'position_id': id_pos,
+            }
+            # if args.debug:
+            #     arg1 = completions_text
+            #     arg2 = compare_completions_text
+            # else: 
+            #     trained_first = random.choice([True, False]) # Randomly choose which model is first
+            #     trained_first_cnt += 1 if trained_first else 0
+            #     arg1 = completions_text         if trained_first else compare_completions_text
+            #     arg2 = compare_completions_text if trained_first else completions_text
+            #     f.write(f"\nTrained model {'FIRST' if trained_first else 'SECOND'} in this comparison\n")
             # Score completions to get reward metrics
             rewards_per_func, reward_metrics = eval_class.compute_rewards(
-                input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
+                input_prompt=input_prompt,
                 all_models=all_models, 
                 train_model_completions=arg1, 
                 compare_model_completions=arg2,
                 device=device,
                 is_test=True, 
+                one_first=True,
                 contrastive=args.contrastive_eval,
             )
 
-            if args.debug:
-                arg1 = compare_completions_text
-                arg2 = completions_text
-                # Score completions to get reward metrics
-                rewards_per_func_2, reward_metrics_2 = eval_class.compute_rewards(
-                    input_prompt=prompt_2[1]['content'] if args.contrastive_eval else prompt[1]['content'], 
-                    all_models=all_models, 
-                    train_model_completions=arg1, 
-                    compare_model_completions=arg2,
-                    device=device,
-                    is_test=True, 
-                    contrastive=args.contrastive_eval,
-                )
+            # if args.debug:
+            arg1 = compare_completions_text
+            arg2 = completions_text
+            input_prompt = {
+                'question': question,
+                'positions': positions,
+                'position_id': 1 - id_pos,  # Switch position for contrastive eval
+            }
+            # Score completions to get reward metrics
+            rewards_per_func_2, reward_metrics_2 = eval_class.compute_rewards(
+                input_prompt=input_prompt,
+                all_models=all_models, 
+                train_model_completions=arg1, 
+                compare_model_completions=arg2,
+                device=device,
+                is_test=True, 
+                one_first=False,
+                contrastive=args.contrastive_eval,
+            )
             
             # Track total comparisons and wins
-            comparisons_this_question = len(completions_text)
+            comparisons_this_question = 2*len(completions_text)
             total_comparisons += comparisons_this_question
-            if args.debug:
-                wins_first += reward_metrics['num_wins']
-                wins_second += args.num_chains - reward_metrics_2['num_wins']
-                total_wins += wins_first + wins_second
-            else:
-                total_wins += reward_metrics['num_wins']
-                if trained_first:
-                    wins_first += reward_metrics['num_wins']
-                else:
-                    wins_second += reward_metrics['num_wins']
+            # if args.debug:
+            wins_first += reward_metrics['num_wins']
+            wins_second += args.num_chains - reward_metrics_2['num_wins']
+            total_wins += reward_metrics['num_wins'] + (args.num_chains - reward_metrics_2['num_wins'])
+            # else:
+            #     total_wins += reward_metrics['num_wins']
+            #     if trained_first:
+            #         wins_first += reward_metrics['num_wins']
+            #     else:
+            #         wins_second += reward_metrics['num_wins']
 
 
             # For each completion pair, log the results
             for i, (completion, compare_completion) in enumerate(zip(completions_text, compare_completions_text)):
+                f.write("-"*40 + "\n\n")
                 f.write(f"\nCompletion #{i+1}:\n")
                 f.write("-"*40 + "\n\n")
 
                 # Log trained model's response
-                f.write("TRAINED MODEL RESPONSE:\n")
-                f.write(f"Full response:\n{completion}\n\n")
+                # f.write("TRAINED MODEL RESPONSE:\n")
+                # f.write(f"Full response:\n{completion}\n\n")
                 
                 try:
                     trained_reasoning = completion.split("<reasoning>\n")[1].split("\n</reasoning>")[0]
@@ -163,12 +212,17 @@ def eval_on_test_set(
                     trained_reasoning = "ERROR: Could not parse reasoning"
                     trained_answer = "ERROR: Could not parse answer"
                 
-                f.write(f"Parsed reasoning:\n{trained_reasoning}\n")
-                f.write(f"Parsed answer:\n{trained_answer}\n\n")
+                # f.write(f"Parsed reasoning:\n{trained_reasoning}\n")
+                # f.write(f"Parsed answer:\n{trained_answer}\n\n")
+                
+                # Log as copyable Python dictionary
+                f.write("TRAINED MODEL RESPONSE (Python dict format):\n")
+                f.write(format_response_as_dict(completion, f"trained_response_{i+1}"))
+                f.write("\n\n")
 
                 # Log compare model's response
-                f.write("COMPARE MODEL RESPONSE:\n")
-                f.write(f"Full response:\n{compare_completion}\n\n")
+                # f.write("COMPARE MODEL RESPONSE:\n")
+                # f.write(f"Full response:\n{compare_completion}\n\n")
                 
                 try:
                     compare_reasoning = compare_completion.split("<reasoning>\n")[1].split("\n</reasoning>")[0]
@@ -177,8 +231,13 @@ def eval_on_test_set(
                     compare_reasoning = "ERROR: Could not parse reasoning"
                     compare_answer = "ERROR: Could not parse answer"
                 
-                f.write(f"Parsed reasoning:\n{compare_reasoning}\n")
-                f.write(f"Parsed answer:\n{compare_answer}\n\n")
+                # f.write(f"Parsed reasoning:\n{compare_reasoning}\n")
+                # f.write(f"Parsed answer:\n{compare_answer}\n\n")
+                
+                # Log as copyable Python dictionary
+                f.write("COMPARE MODEL RESPONSE (Python dict format):\n")
+                f.write(format_response_as_dict(compare_completion, f"compare_response_{i+1}"))
+                f.write("\n\n")
 
                 # Log reward scores for this completion
                 f.write("REWARD SCORES:\n")
@@ -196,22 +255,22 @@ def eval_on_test_set(
                 f.write(f"\nOUTCOME: Trained model {'won' if trained_model_won else 'lost'} this comparison\n")
                 f.write("-"*40 + "\n")
                 
-                if args.debug:
-                    # Log reward scores for this completion
-                    f.write("REWARD SCORES WHEN SECOND:\n")
-                    reward_breakdown_2 = eval_class.get_reward_breakdown(rewards_per_func_2[i])
-                    for reward_name, reward_value in reward_breakdown_2.items():
-                        f.write(f"{reward_name}: {reward_value:.4f}\n")
-                    f.write(f"Total reward: {rewards_per_func[i].sum().item():.4f}\n")
+                # if args.debug:
+                # Log reward scores for this completion
+                f.write("REWARD SCORES WHEN SECOND:\n")
+                reward_breakdown_2 = eval_class.get_reward_breakdown(rewards_per_func_2[i])
+                for reward_name, reward_value in reward_breakdown_2.items():
+                    f.write(f"{reward_name}: {reward_value:.4f}\n")
+                f.write(f"Total reward: {rewards_per_func[i].sum().item():.4f}\n")
 
-                    # Log judge response for this specific comparison
-                    if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
-                        f.write(f"\nJUDGE RESPONSE:\n{eval_class.last_judge_responses[i]}\n")
+                # Log judge response for this specific comparison
+                if hasattr(eval_class, 'last_judge_responses') and eval_class.last_judge_responses and i < len(eval_class.last_judge_responses):
+                    f.write(f"\nJUDGE RESPONSE:\n{eval_class.last_judge_responses[i]}\n")
 
-                    # Log if trained model won this comparison
-                    trained_model_won = rewards_per_func_2[i,0] > 0
-                    f.write(f"\nOUTCOME: Compare model {'won' if trained_model_won else 'lost'} this comparison\n")
-                    f.write("-"*40 + "\n")
+                # Log if trained model won this comparison
+                trained_model_won = rewards_per_func_2[i,0] > 0
+                f.write(f"\nOUTCOME: Compare model {'won' if trained_model_won else 'lost'} this comparison\n")
+                f.write("-"*40 + "\n")
 
 
             # Log summary metrics for this question
@@ -230,10 +289,10 @@ def eval_on_test_set(
                     total_scores[k] += v
         
         # Calculate final metrics
-        if args.debug:
-            win_rate = (total_wins / (2*total_comparisons)) * 100 if total_comparisons > 0 else 0
-        else:
-            win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
+        # if args.debug:
+        win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
+        # else:
+        #     win_rate = (total_wins / total_comparisons) * 100 if total_comparisons > 0 else 0
         avg_scores = {k: v/num_examples for k,v in total_scores.items()}
 
         # Save metrics
@@ -243,7 +302,7 @@ def eval_on_test_set(
             'wins_first': wins_first,
             'wins_second': wins_second,
             'trained_first_cnt': trained_first_cnt,
-            'total_comparisons': 2*total_comparisons if args.debug else total_comparisons,
+            'total_comparisons': total_comparisons,
             'num_examples': num_examples,
             'average_scores': avg_scores
         }
@@ -253,7 +312,7 @@ def eval_on_test_set(
         f.write("-" * 20 + "\n")
         f.write(f"Win Rate: {win_rate:.2f}%\n")
         f.write(f"Total Wins: {total_wins}\n") 
-        f.write(f"Total Comparisons: {2*total_comparisons}\n")
+        f.write(f"Total Comparisons: {total_comparisons}\n")
         f.write("\nAverage Scores:\n")
         for metric, value in avg_scores.items():
             f.write(f"{metric:15s}: {value:.4f}\n")
@@ -741,11 +800,11 @@ def grpo_loss(
     """
 
     
-    # position_id = 0 if args.dataset_name == "debate_code" else random.choice([0,1]) 
+    position_id = 0 if args.dataset_name == "debate_code" else random.choice([0,1]) 
     
     prompt = [
         {'role': 'system', 'content': test_loader.pre_prompt},
-        {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[0]}"}
+        {'role': 'user', 'content': question + f"\nPosition you have to defend: {positions[position_id]}"}
     ]
     prompt_text = all_models["training_model_tokenizer"].apply_chat_template(prompt, tokenize=False)
 
@@ -756,11 +815,12 @@ def grpo_loss(
     input_prompt = {
         'question': question,
         'positions': positions,
+        'position_id': position_id,
     }
     if args.contrastive_training: 
         # raise NotImplementedError("Contrastive training not implemented in this function")
         prompt_2 = prompt.copy()
-        prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1]}"
+        prompt_2[1]['content'] = question + f"\nPosition you have to defend: {positions[1-position_id]}"
         prompt_text_2 = all_models["training_model_tokenizer"].apply_chat_template(prompt_2, tokenize=False)
         prompt_completion_ids_2, prompt_2_ids, completion_ids_2, attention_mask_2, completions_text_2, _ = generate_completions(
             all_models["training_model"], all_models["training_model_tokenizer"], prompt_text, device, args
@@ -808,8 +868,9 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name/path of base model")
     parser.add_argument("--judge_model_name", type=str, default="Qwen/Qwen2.5-1.5B-Instruct", help="Name of model to use as judge")
     parser.add_argument("--compare_model_name", type=str, default="gpt-4o-mini", help="Name of model to use for comparison")
+    parser.add_argument("--compare_checkpoint_path", type=str, default=None, help="Path to checkpoint file for compare model")
     parser.add_argument("--dataset_name", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Dataset to use for training")
-    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "ld", "chopped"], help="Evaluator to use for scoring")
+    parser.add_argument("--evaluator", type=str, default="debate", choices=["debate", "debate_opponent", "ld", "chopped"], help="Evaluator to use for scoring")
 
     # Output and logging
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save outputs")
@@ -924,7 +985,7 @@ if __name__ == "__main__":
 
     # Get judge and compare models using the new interfaces
     judge_model = llms.get_judge_model(args.judge_model_name, device)
-    compare_model = judge_model
+    compare_model = llms.get_compare_model(args.compare_model_name, device, args.compare_checkpoint_path)
     
     # Simplified all_models dictionary
     all_models = {
@@ -941,6 +1002,7 @@ if __name__ == "__main__":
 
     ## Set which evaluation criteria to use 
     eval_class = evaluator.get_evaluator(args.evaluator)
+    # eval_class.set_comprehensive_prompt(True)
 
 
     # Setup logging 
@@ -1021,7 +1083,7 @@ if __name__ == "__main__":
                 }, f, indent=4)
 
         # Save checkpoint
-        if (round_num + 1) % args.save_steps == 0 and round_num >= 300:
+        if (round_num + 1) % args.save_steps == 0 and (round_num >= 300 or round_num < 40):
             checkpoint_path = os.path.join(checkpoint_dir, f'step_{round_num}.pt')
             torch.save({
                 'round_num': round_num,
@@ -1105,6 +1167,9 @@ if __name__ == "__main__":
             else: 
                 wandb_log.update({
                     f"train/rewards/mean_win_rate": train_metrics.get("rewards/mean_win_rate", 0),
+                    f"train/rewards/mean_win_first": train_metrics.get("rewards/mean_win_first", 0),
+                    f"train/rewards/mean_win_second": train_metrics.get("rewards/mean_win_second", 0),
+                    f"train/rewards/mean_debate_score": train_metrics.get("rewards/mean_debate_score", 0),
                     f"train/rewards/mean_strict_format": train_metrics.get("rewards/mean_strict_format", 0),
                     f"train/rewards/mean_soft_format": train_metrics.get("rewards/mean_soft_format", 0),
                     f"train/rewards/xml_count": train_metrics.get("rewards/xml_count", 0),

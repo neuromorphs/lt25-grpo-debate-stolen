@@ -77,8 +77,8 @@ def write_generation_log(log_data: Dict[str, Any], log_file: str) -> None:
                 for reward_name, reward_value in gen['scores'].items():
                     f.write(f"{reward_name}: {reward_value:.4f}\n")
                 # Total reward is sum of individual scores
-                total_reward = sum(gen['scores'].values())
-                f.write(f"Total reward: {total_reward:.4f}\n\n")
+                # total_reward = sum(gen['scores'].values())
+                # f.write(f"Total reward: {total_reward:.4f}\n\n")
                 
                 # Write judge response if available
                 if 'judge_response' in gen:
