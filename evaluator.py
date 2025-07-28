@@ -239,9 +239,9 @@ class DebateEvaluator(RewardEvaluator):
             # Penalize the length of the content inside <answer> tags
             if "<answer>" in text and "</answer>" in text:
                 content = text.split("<answer>")[-1].split("</answer>")[0].strip()
-                # if len(content) > 1400:
-                #     count -= (0.5 + (len(content) - 1400) / 2800)  # Penalize for excessive length
-                count -= len(content) * 1.5/1400  # Penalize for content length
+                if len(content) > 500:
+                    count -= (len(content) - 500) * 1.5 / 500  # Penalize for excessive length
+                # count -= len(content) * 1.5/1400  # Penalize for content length
             
             # Only penalize actual content after final tag
             if "</answer>" in text:
